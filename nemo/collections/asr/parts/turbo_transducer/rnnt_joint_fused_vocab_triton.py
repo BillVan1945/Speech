@@ -362,7 +362,7 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     )
 
 
-class _RnntJointFusedVocab(torch.autograd.Function):
+class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -519,7 +519,7 @@ def rnnt_joint_fused_vocab_triton(
     blank_id: int,
     use_high_precision: bool = False,
 ):
-    target_logprobs, blank_logprobs = _RnntJointFusedVocab.apply(
+    target_logprobs, blank_logprobs = _RnntJointFusedVocabTritonFunction.apply(
         joint_hidden,
         targets,
         tgt_lengths,

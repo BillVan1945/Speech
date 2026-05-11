@@ -504,7 +504,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
     )
 
 
-class _RnntFusedJoint(torch.autograd.Function):
+class _RnntFusedJointTritonFunction(torch.autograd.Function):
     """
     Function to calculate log probabilities for target and blank labels for RNN-T, supporting torch.autograd.
     Fuses Joint network (linear + relu + linear) with log-softmax to avoid materializing large intermediate tensors.
@@ -739,7 +739,7 @@ def rnnt_fused_joint_triton(
     dropout_seed: int | None = None,
     use_high_precision: bool = False,
 ):
-    target_logprobs, blank_logprobs = _RnntFusedJoint.apply(
+    target_logprobs, blank_logprobs = _RnntFusedJointTritonFunction.apply(
         encoder_output_projected,
         predictor_output_projected,
         targets,
