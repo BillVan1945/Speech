@@ -23,7 +23,7 @@ from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp
 
 
 @triton.jit
-def _rnnt_joint_fwd_kernel(
+def _rnnt_fused_joint_fwd_triton_kernel(
     encoder_output_ptr,
     predictor_output_ptr,
     targets_ptr,
@@ -232,7 +232,7 @@ def _rnnt_joint_fwd_kernel(
 
 
 @triton.jit
-def _rnnt_joint_bwd_kernel(
+def _rnnt_fused_joint_bwd_triton_kernel(
     encoder_output_ptr,
     predictor_output_ptr,
     targets_ptr,
@@ -504,7 +504,7 @@ def _rnnt_joint_bwd_kernel(
     )
 
 
-class RnntJointLogProbs(torch.autograd.Function):
+class _RnntFusedJoint(torch.autograd.Function):
     """
     Function to calculate log probabilities for target and blank labels for RNN-T, supporting torch.autograd.
     Fuses Joint network (linear + relu + linear) with log-softmax to avoid materializing large intermediate tensors.
@@ -572,7 +572,7 @@ class RnntJointLogProbs(torch.autograd.Function):
         num_encoder_blocks = triton.cdiv(src_max_length, ENCODER_BLOCK)
         num_predictor_blocks = triton.cdiv(tgt_max_length_plus_1, PREDICTOR_BLOCK)
 
-        _rnnt_joint_fwd_kernel[(batch_size, num_encoder_blocks, num_predictor_blocks)](
+        _rnnt_fused_joint_fwd_triton_kernel[(batch_size, num_encoder_blocks, num_predictor_blocks)](
             encoder_output_ptr=encoder_output_projected,
             predictor_output_ptr=predictor_output_projected,
             targets_ptr=targets,
@@ -680,7 +680,7 @@ class RnntJointLogProbs(torch.autograd.Function):
         bwd_num_warps = 4
         bwd_num_stages = 1
 
-        _rnnt_joint_bwd_kernel[(batch_size, ENCODER_X_PREDICTOR_SPLITS, vocab_blocks)](
+        _rnnt_fused_joint_bwd_triton_kernel[(batch_size, ENCODER_X_PREDICTOR_SPLITS, vocab_blocks)](
             encoder_output_ptr=encoder_output_projected,
             predictor_output_ptr=predictor_output_projected,
             targets_ptr=targets,
@@ -725,7 +725,7 @@ class RnntJointLogProbs(torch.autograd.Function):
         return grad_encoder, grad_predictor, None, None, None, grad_weight, grad_bias, None, None, None, None, None
 
 
-def rnnt_joint_logprobs_triton(
+def rnnt_fused_joint_triton(
     encoder_output_projected: torch.Tensor,
     predictor_output_projected: torch.Tensor,
     targets: torch.Tensor,
@@ -739,7 +739,7 @@ def rnnt_joint_logprobs_triton(
     dropout_seed: int | None = None,
     use_high_precision: bool = False,
 ):
-    target_logprobs, blank_logprobs = RnntJointLogProbs.apply(
+    target_logprobs, blank_logprobs = _RnntFusedJoint.apply(
         encoder_output_projected,
         predictor_output_projected,
         targets,

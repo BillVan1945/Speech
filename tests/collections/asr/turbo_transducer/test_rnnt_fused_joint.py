@@ -16,6 +16,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from nemo.collections.asr.parts.turbo_transducer.rnnt_fused_joint import rnnt_fused_joint
 from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import rnnt_logprobs_torch
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 from tests.collections.asr.decoding.utils import avoid_sync_operations
@@ -23,7 +24,6 @@ from tests.collections.asr.decoding.utils import avoid_sync_operations
 if TRITON_AVAILABLE:
     import triton
 
-    from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_triton import rnnt_joint_logprobs_triton
     from nemo.collections.asr.parts.turbo_transducer.utils_triton import dropout_scale_mask_kernel
 
 
@@ -130,7 +130,7 @@ class TestRnntJointTriton:
         pred_tri = pred.detach().clone().requires_grad_(True)
         weight_tri = weight.detach().clone().requires_grad_(True)
         bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_logprobs_triton(
+        target_tri, blank_tri = rnnt_fused_joint(
             encoder_output_projected=enc_tri,
             predictor_output_projected=pred_tri,
             targets=targets,
@@ -224,7 +224,7 @@ class TestRnntJointTriton:
         pred_tri = pred.detach().clone().requires_grad_(True)
         weight_tri = weight.detach().clone().requires_grad_(True)
         bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_logprobs_triton(
+        target_tri, blank_tri = rnnt_fused_joint(
             encoder_output_projected=enc_tri,
             predictor_output_projected=pred_tri,
             targets=targets,
@@ -281,7 +281,7 @@ class TestRnntJointTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_logprobs_triton(
+        target_tri, blank_tri = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -345,7 +345,7 @@ class TestRnntJointTriton:
         pred_tri = pred.detach().clone().requires_grad_(True)
         weight_tri = weight.detach().clone().requires_grad_(True)
         bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_logprobs_triton(
+        target_tri, blank_tri = rnnt_fused_joint(
             encoder_output_projected=enc_tri,
             predictor_output_projected=pred_tri,
             targets=targets,
@@ -397,7 +397,7 @@ class TestRnntJointTriton:
         src_lengths = torch.full([batch_size], src_length, device=device, dtype=torch.long)
         tgt_lengths = torch.full([batch_size], tgt_length, device=device, dtype=torch.long)
 
-        target_same_0, blank_same_0 = rnnt_joint_logprobs_triton(
+        target_same_0, blank_same_0 = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -409,7 +409,7 @@ class TestRnntJointTriton:
             dropout_p=dropout_p,
             dropout_seed=dropout_seed_same,
         )
-        target_same_1, blank_same_1 = rnnt_joint_logprobs_triton(
+        target_same_1, blank_same_1 = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -421,7 +421,7 @@ class TestRnntJointTriton:
             dropout_p=dropout_p,
             dropout_seed=dropout_seed_same,
         )
-        target_different, blank_different = rnnt_joint_logprobs_triton(
+        target_different, blank_different = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -470,7 +470,7 @@ class TestRnntJointTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_logprobs_triton(
+        target_tri, blank_tri = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -507,7 +507,7 @@ class TestRnntJointTriton:
         tgt_lengths = torch.full([batch_size], tgt_length, device=device, dtype=torch.long)
 
         # Warmup
-        target_logprobs, blank_logprobs = rnnt_joint_logprobs_triton(
+        target_logprobs, blank_logprobs = rnnt_fused_joint(
             encoder_output_projected=enc,
             predictor_output_projected=pred,
             targets=targets,
@@ -527,7 +527,7 @@ class TestRnntJointTriton:
         bias_test = bias.detach().clone().requires_grad_(True)
 
         with avoid_sync_operations(device):
-            target_logprobs_test, blank_logprobs_test = rnnt_joint_logprobs_triton(
+            target_logprobs_test, blank_logprobs_test = rnnt_fused_joint(
                 encoder_output_projected=enc_test,
                 predictor_output_projected=pred_test,
                 targets=targets,
@@ -563,7 +563,7 @@ class TestRnntJointTriton:
         tgt_lengths = torch.full([batch_size], tgt_length, device=device, dtype=torch.long)
 
         def func(enc_in, pred_in, w_in, b_in):
-            t_lp, b_lp = rnnt_joint_logprobs_triton(
+            t_lp, b_lp = rnnt_fused_joint(
                 encoder_output_projected=enc_in,
                 predictor_output_projected=pred_in,
                 targets=targets,

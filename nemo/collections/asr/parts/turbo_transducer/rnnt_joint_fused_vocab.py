@@ -14,7 +14,6 @@
 
 
 import torch
-import torch.nn.functional as F
 
 from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
 from nemo.utils.enum import PrettyStrEnum
@@ -23,7 +22,7 @@ if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
 
 
-class JointFusedVocabBackend(PrettyStrEnum):
+class RnntJointFusedVocabBackend(PrettyStrEnum):
     TRITON = "triton"
     CUTILE = "cutile"
 
@@ -37,20 +36,20 @@ def rnnt_joint_fused_vocab(
     bias: torch.Tensor,
     blank_id: int,
     use_high_precision: bool = False,
-    backend: str | JointFusedVocabBackend | None = JointFusedVocabBackend.TRITON,
+    backend: str | RnntJointFusedVocabBackend | None = RnntJointFusedVocabBackend.TRITON,
 ):
-    backend = JointFusedVocabBackend(backend) if backend is not None else None
+    backend = RnntJointFusedVocabBackend(backend) if backend is not None else None
 
     if backend is None:
         if TRITON_AVAILABLE:
-            backend = JointFusedVocabBackend.TRITON
+            backend = RnntJointFusedVocabBackend.TRITON
         elif CUTILE_AVAILABLE:
-            backend = JointFusedVocabBackend.CUTILE
+            backend = RnntJointFusedVocabBackend.CUTILE
         else:
             raise Exception("No backend")
 
     match backend:
-        case JointFusedVocabBackend.TRITON:
+        case RnntJointFusedVocabBackend.TRITON:
             if not TRITON_AVAILABLE:
                 raise ModuleNotFoundError("Triton is unavailable")
             target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_triton(
@@ -63,10 +62,10 @@ def rnnt_joint_fused_vocab(
                 blank_id,
                 use_high_precision,
             )
-        case JointFusedVocabBackend.CUTILE:
+        case RnntJointFusedVocabBackend.CUTILE:
             if not CUTILE_AVAILABLE:
                 raise ModuleNotFoundError("cuTile is unavailable")
-            # TODO: implement
+            raise NotImplementedError("cuTile support not yet implemented")
         case _:
             raise Exception("Not implemented backend")
     return target_logprobs, blank_logprobs

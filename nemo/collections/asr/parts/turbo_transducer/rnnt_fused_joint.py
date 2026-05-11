@@ -12,4 +12,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
- 
+
+import torch
+
+from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
+from nemo.utils.enum import PrettyStrEnum
+
+if TRITON_AVAILABLE:
+    from nemo.collections.asr.parts.turbo_transducer.rnnt_fused_joint_triton import rnnt_fused_joint_triton
+
+
+class RnntFusedJointBackend(PrettyStrEnum):
+    TRITON = "triton"
+    CUTILE = "cutile"
+
+
+def rnnt_fused_joint(
+    encoder_output_projected: torch.Tensor,
+    predictor_output_projected: torch.Tensor,
+    targets: torch.Tensor,
+    tgt_lengths: torch.Tensor,
+    src_lengths: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    blank_id: int,
+    activation: str = "relu",
+    dropout_p: float = 0.0,
+    dropout_seed: int | None = None,
+    use_high_precision: bool = False,
+    backend: str | RnntFusedJointBackend | None = RnntFusedJointBackend.TRITON,
+):
+    backend = RnntFusedJointBackend(backend) if backend is not None else None
+
+    if backend is None:
+        if TRITON_AVAILABLE:
+            backend = RnntFusedJointBackend.TRITON
+        elif CUTILE_AVAILABLE:
+            backend = RnntFusedJointBackend.CUTILE
+        else:
+            raise Exception("No backend")
+
+    match backend:
+        case RnntFusedJointBackend.TRITON:
+            if not TRITON_AVAILABLE:
+                raise ModuleNotFoundError("Triton is unavailable")
+            target_logprobs, blank_logprobs = rnnt_fused_joint_triton(
+                encoder_output_projected,
+                predictor_output_projected,
+                targets,
+                tgt_lengths,
+                src_lengths,
+                weight,
+                bias,
+                blank_id,
+                activation,
+                dropout_p,
+                dropout_seed,
+                use_high_precision,
+            )
+        case RnntFusedJointBackend.CUTILE:
+            if not CUTILE_AVAILABLE:
+                raise ModuleNotFoundError("cuTile is unavailable")
+            raise NotImplementedError("cuTile support not yet implemented")
+        case _:
+            raise Exception("Not implemented backend")
+    return target_logprobs, blank_logprobs
