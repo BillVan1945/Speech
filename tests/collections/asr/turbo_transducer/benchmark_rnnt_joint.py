@@ -32,7 +32,7 @@ import torch.nn.functional as F
 
 from nemo.collections.asr.losses.rnnt import RNNTLoss
 from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_triton import rnnt_joint_logprobs_triton
-from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_vocab_logprobs_triton import rnnt_joint_vocab_logprobs_triton
+from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
 from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_from_logprobs_triton
 
 
@@ -396,7 +396,7 @@ def benchmark_triton_vocab_joint(
         joint_hidden.relu_()
         if dropout_p > 0.0:
             joint_hidden = F.dropout(joint_hidden, p=dropout_p, training=True)
-        target_logprobs, blank_logprobs = rnnt_joint_vocab_logprobs_triton(
+        target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_triton(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,

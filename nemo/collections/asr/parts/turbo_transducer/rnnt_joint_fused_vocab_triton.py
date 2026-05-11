@@ -21,7 +21,7 @@ from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp
 
 
 @triton.jit
-def _rnnt_joint_vocab_fwd_kernel(
+def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     joint_hidden_ptr,
     targets_ptr,
     src_lengths_ptr,
@@ -167,7 +167,7 @@ def _rnnt_joint_vocab_fwd_kernel(
 
 
 @triton.jit
-def _rnnt_joint_vocab_bwd_kernel(
+def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     joint_hidden_ptr,
     targets_ptr,
     src_lengths_ptr,
@@ -362,7 +362,7 @@ def _rnnt_joint_vocab_bwd_kernel(
     )
 
 
-class RnntJointVocabLogProbs(torch.autograd.Function):
+class _RnntJointFusedVocab(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
@@ -403,7 +403,7 @@ class RnntJointVocabLogProbs(torch.autograd.Function):
         forward_num_stages = 1 if use_high_precision else 2
         num_warps = 4
 
-        _rnnt_joint_vocab_fwd_kernel[(flattened_batch_blocks,)](
+        _rnnt_joint_fused_vocab_fwd_triton_kernel[(flattened_batch_blocks,)](
             joint_hidden_ptr=joint_hidden,
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
@@ -472,7 +472,7 @@ class RnntJointVocabLogProbs(torch.autograd.Function):
         num_warps = 4
         num_stages = 1
 
-        _rnnt_joint_vocab_bwd_kernel[(FLATTENED_BATCH_SPLITS, vocab_blocks)](
+        _rnnt_joint_fused_vocab_bwd_triton_kernel[(FLATTENED_BATCH_SPLITS, vocab_blocks)](
             joint_hidden_ptr=joint_hidden,
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
@@ -509,7 +509,7 @@ class RnntJointVocabLogProbs(torch.autograd.Function):
         return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None
 
 
-def rnnt_joint_vocab_logprobs_triton(
+def rnnt_joint_fused_vocab_triton(
     joint_hidden: torch.Tensor,
     targets: torch.Tensor,
     tgt_lengths: torch.Tensor,
@@ -519,7 +519,7 @@ def rnnt_joint_vocab_logprobs_triton(
     blank_id: int,
     use_high_precision: bool = False,
 ):
-    target_logprobs, blank_logprobs = RnntJointVocabLogProbs.apply(
+    target_logprobs, blank_logprobs = _RnntJointFusedVocab.apply(
         joint_hidden,
         targets,
         tgt_lengths,
