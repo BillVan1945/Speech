@@ -21,6 +21,9 @@ from nemo.utils.enum import PrettyStrEnum
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
 
+if CUTILE_AVAILABLE:
+    from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_cutile import rnnt_joint_fused_vocab_cutile
+
 
 class RnntJointFusedVocabBackend(PrettyStrEnum):
     TRITON = "triton"
@@ -53,19 +56,28 @@ def rnnt_joint_fused_vocab(
             if not TRITON_AVAILABLE:
                 raise ModuleNotFoundError("Triton is unavailable")
             target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_triton(
-                joint_hidden,
-                targets,
-                tgt_lengths,
-                src_lengths,
-                weight,
-                bias,
-                blank_id,
-                use_high_precision,
+                joint_hidden=joint_hidden,
+                targets=targets,
+                tgt_lengths=tgt_lengths,
+                src_lengths=src_lengths,
+                weight=weight,
+                bias=bias,
+                blank_id=blank_id,
+                use_high_precision=use_high_precision,
             )
         case RnntJointFusedVocabBackend.CUTILE:
             if not CUTILE_AVAILABLE:
                 raise ModuleNotFoundError("cuTile is unavailable")
-            raise NotImplementedError("cuTile support not yet implemented")
+            target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_cutile(
+                joint_hidden=joint_hidden,
+                targets=targets,
+                tgt_lengths=tgt_lengths,
+                src_lengths=src_lengths,
+                weight=weight,
+                bias=bias,
+                blank_id=blank_id,
+                use_high_precision=use_high_precision,
+            )
         case _:
             raise Exception("Not implemented backend")
     return target_logprobs, blank_logprobs

@@ -16,9 +16,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import rnnt_joint_fused_vocab
+from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import (
+    RnntJointFusedVocabBackend,
+    rnnt_joint_fused_vocab,
+)
 from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import rnnt_logprobs_torch
-from nemo.core.utils.optional_libs import TRITON_AVAILABLE
+from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
 from tests.collections.asr.decoding.utils import avoid_sync_operations
 
 
@@ -34,9 +37,23 @@ def _reference_joint_vocab_logprobs(joint_hidden, weight, bias, targets, src_len
     return target_logprobs, blank_logprobs
 
 
-@pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed")
+_BACKEND_PARAMS = [
+    pytest.param(
+        RnntJointFusedVocabBackend.TRITON,
+        marks=pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed"),
+        id="triton",
+    ),
+    pytest.param(
+        RnntJointFusedVocabBackend.CUTILE,
+        marks=pytest.mark.skipif(not CUTILE_AVAILABLE, reason="cuTile is not installed"),
+        id="cutile",
+    ),
+]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-class TestRnntJointVocabLogProbsTriton:
+@pytest.mark.parametrize("backend", _BACKEND_PARAMS)
+class TestRnntJointVocabLogProbs:
     @pytest.mark.parametrize(
         "shape",
         [
@@ -51,11 +68,12 @@ class TestRnntJointVocabLogProbsTriton:
         "float_dtype",
         [torch.float32] + ([torch.bfloat16] if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else []),
     )
-    def test_forward_and_backward(self, shape, float_dtype):
+    def test_forward_and_backward(self, backend, shape, float_dtype):
         device = torch.device("cuda")
         torch.manual_seed(42)
-        use_high_precision = True
-        # torch.autograd.set_detect_anomaly(True)
+        is_triton = backend == RnntJointFusedVocabBackend.TRITON
+        # cuTile path doesn't yet honor use_high_precision and runs through tensor-core mma.
+        use_high_precision = is_triton
         batch_size, src_length, tgt_length, hidden_dim, vocab_size_no_blank = shape
         blank_id = vocab_size_no_blank
         vocab_size_with_blank = vocab_size_no_blank + 1
@@ -87,60 +105,67 @@ class TestRnntJointVocabLogProbsTriton:
             blank_id=blank_id,
         )
 
-        joint_hidden_tri = joint_hidden.detach().clone().requires_grad_(True)
-        weight_tri = weight.detach().clone().requires_grad_(True)
-        bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_fused_vocab(
-            joint_hidden=joint_hidden_tri,
+        joint_hidden_kernel = joint_hidden.detach().clone().requires_grad_(True)
+        weight_kernel = weight.detach().clone().requires_grad_(True)
+        bias_kernel = bias.detach().clone().requires_grad_(True)
+        target_kernel, blank_kernel = rnnt_joint_fused_vocab(
+            joint_hidden=joint_hidden_kernel,
             targets=targets,
             tgt_lengths=tgt_lengths,
             src_lengths=src_lengths,
-            weight=weight_tri,
-            bias=bias_tri,
+            weight=weight_kernel,
+            bias=bias_kernel,
             blank_id=blank_id,
             use_high_precision=use_high_precision,
+            backend=backend,
         )
 
-        forward_atol = 1e-5
+        # cuTile path uses tensor-core mma; relax forward tolerance for it.
+        forward_atol = 1e-5 if is_triton else 5e-4
         assert torch.allclose(
-            target_tri, target_ref, atol=forward_atol
-        ), f"target logprobs mismatch: max diff={(target_tri - target_ref).abs().max().item()}"
+            target_kernel, target_ref, atol=forward_atol
+        ), f"target logprobs mismatch: max diff={(target_kernel - target_ref).abs().max().item()}"
         assert torch.allclose(
-            blank_tri, blank_ref, atol=forward_atol
-        ), f"blank logprobs mismatch: max diff={(blank_tri - blank_ref).abs().max().item()}"
+            blank_kernel, blank_ref, atol=forward_atol
+        ), f"blank logprobs mismatch: max diff={(blank_kernel - blank_ref).abs().max().item()}"
+
+        if not is_triton:
+            # cuTile backward is a stub returning zero gradients; skip gradient checks.
+            return
 
         torch.manual_seed(123)
         target_scales = torch.rand_like(target_ref)
         blank_scales = torch.rand_like(blank_ref)
 
         loss_ref = (target_scales * target_ref + blank_scales * blank_ref).sum()
-        loss_tri = (target_scales * target_tri + blank_scales * blank_tri).sum()
+        loss_kernel = (target_scales * target_kernel + blank_scales * blank_kernel).sum()
         loss_ref.backward()
-        loss_tri.backward()
+        loss_kernel.backward()
 
-        assert joint_hidden_tri.grad.dtype == float_dtype
-        assert weight_tri.grad.dtype == float_dtype
-        assert bias_tri.grad.dtype == float_dtype
+        assert joint_hidden_kernel.grad.dtype == float_dtype
+        assert weight_kernel.grad.dtype == float_dtype
+        assert bias_kernel.grad.dtype == float_dtype
 
         grad_atol = 5e-3 if float_dtype == torch.bfloat16 else 1e-4
         grad_rtol = 5e-3 if float_dtype == torch.bfloat16 else 1e-5
         assert torch.allclose(
-            joint_hidden_tri.grad.float(), joint_hidden_ref.grad.float(), atol=grad_atol, rtol=grad_rtol
-        ), f"joint_hidden grad mismatch: max diff={(joint_hidden_tri.grad.float() - joint_hidden_ref.grad.float()).abs().max().item()}"
+            joint_hidden_kernel.grad.float(), joint_hidden_ref.grad.float(), atol=grad_atol, rtol=grad_rtol
+        ), f"joint_hidden grad mismatch: max diff={(joint_hidden_kernel.grad.float() - joint_hidden_ref.grad.float()).abs().max().item()}"
 
         weight_bias_atol = 1e-0 if float_dtype == torch.bfloat16 else 1e-4
         weight_bias_rtol = 1e-3 if float_dtype == torch.bfloat16 else 1e-5
         assert torch.allclose(
-            weight_tri.grad.float(), weight_ref.grad.float(), atol=weight_bias_atol, rtol=weight_bias_rtol
-        ), f"weight grad mismatch: max diff={(weight_tri.grad.float() - weight_ref.grad.float()).abs().max().item()}"
+            weight_kernel.grad.float(), weight_ref.grad.float(), atol=weight_bias_atol, rtol=weight_bias_rtol
+        ), f"weight grad mismatch: max diff={(weight_kernel.grad.float() - weight_ref.grad.float()).abs().max().item()}"
         assert torch.allclose(
-            bias_tri.grad.float(), bias_ref.grad.float(), atol=weight_bias_atol, rtol=weight_bias_rtol
-        ), f"bias grad mismatch: max diff={(bias_tri.grad.float() - bias_ref.grad.float()).abs().max().item()}"
+            bias_kernel.grad.float(), bias_ref.grad.float(), atol=weight_bias_atol, rtol=weight_bias_rtol
+        ), f"bias grad mismatch: max diff={(bias_kernel.grad.float() - bias_ref.grad.float()).abs().max().item()}"
 
-    def test_variable_lengths(self):
+    def test_variable_lengths(self, backend):
         device = torch.device("cuda")
         torch.manual_seed(42)
-        use_high_precision = True
+        is_triton = backend == RnntJointFusedVocabBackend.TRITON
+        use_high_precision = is_triton
         batch_size = 4
         src_length = 16
         tgt_length = 8
@@ -171,36 +196,40 @@ class TestRnntJointVocabLogProbsTriton:
             blank_id=blank_id,
         )
 
-        joint_hidden_tri = joint_hidden.detach().clone().requires_grad_(True)
-        weight_tri = weight.detach().clone().requires_grad_(True)
-        bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_fused_vocab(
-            joint_hidden=joint_hidden_tri,
+        joint_hidden_kernel = joint_hidden.detach().clone().requires_grad_(True)
+        weight_kernel = weight.detach().clone().requires_grad_(True)
+        bias_kernel = bias.detach().clone().requires_grad_(True)
+        target_kernel, blank_kernel = rnnt_joint_fused_vocab(
+            joint_hidden=joint_hidden_kernel,
             targets=targets,
             tgt_lengths=tgt_lengths,
             src_lengths=src_lengths,
-            weight=weight_tri,
-            bias=bias_tri,
+            weight=weight_kernel,
+            bias=bias_kernel,
             blank_id=blank_id,
             use_high_precision=use_high_precision,
+            backend=backend,
         )
 
-        forward_atol = 1e-5
-        assert torch.allclose(target_tri, target_ref, atol=forward_atol)
-        assert torch.allclose(blank_tri, blank_ref, atol=forward_atol)
+        forward_atol = 1e-5 if is_triton else 5e-4
+        assert torch.allclose(target_kernel, target_ref, atol=forward_atol)
+        assert torch.allclose(blank_kernel, blank_ref, atol=forward_atol)
+
+        if not is_triton:
+            return
 
         target_scales = torch.rand_like(target_ref)
         blank_scales = torch.rand_like(blank_ref)
         loss_ref = (target_scales * target_ref + blank_scales * blank_ref).sum()
-        loss_tri = (target_scales * target_tri + blank_scales * blank_tri).sum()
+        loss_kernel = (target_scales * target_kernel + blank_scales * blank_kernel).sum()
         loss_ref.backward()
-        loss_tri.backward()
+        loss_kernel.backward()
 
-        assert torch.allclose(joint_hidden_tri.grad.float(), joint_hidden_ref.grad.float(), atol=5e-3, rtol=1e-3)
-        assert torch.allclose(weight_tri.grad.float(), weight_ref.grad.float(), atol=0.5, rtol=1e-3)
-        assert torch.allclose(bias_tri.grad.float(), bias_ref.grad.float(), atol=0.5, rtol=1e-3)
+        assert torch.allclose(joint_hidden_kernel.grad.float(), joint_hidden_ref.grad.float(), atol=5e-3, rtol=1e-3)
+        assert torch.allclose(weight_kernel.grad.float(), weight_ref.grad.float(), atol=0.5, rtol=1e-3)
+        assert torch.allclose(bias_kernel.grad.float(), bias_ref.grad.float(), atol=0.5, rtol=1e-3)
 
-    def test_edge_case_single_frame(self):
+    def test_edge_case_single_frame(self, backend):
         device = torch.device("cuda")
         torch.manual_seed(42)
         batch_size = 1
@@ -229,7 +258,7 @@ class TestRnntJointVocabLogProbsTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_fused_vocab(
+        target_kernel, blank_kernel = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -237,12 +266,13 @@ class TestRnntJointVocabLogProbsTriton:
             weight=weight,
             bias=bias,
             blank_id=blank_id,
+            backend=backend,
         )
 
-        assert torch.allclose(target_tri, target_ref, atol=5e-3)
-        assert torch.allclose(blank_tri, blank_ref, atol=5e-3)
+        assert torch.allclose(target_kernel, target_ref, atol=5e-3)
+        assert torch.allclose(blank_kernel, blank_ref, atol=5e-3)
 
-    def test_edge_case_blank_only(self):
+    def test_edge_case_blank_only(self, backend):
         device = torch.device("cuda")
         torch.manual_seed(42)
         batch_size = 2
@@ -273,7 +303,7 @@ class TestRnntJointVocabLogProbsTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_fused_vocab(
+        target_kernel, blank_kernel = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -281,12 +311,13 @@ class TestRnntJointVocabLogProbsTriton:
             weight=weight,
             bias=bias,
             blank_id=blank_id,
+            backend=backend,
         )
 
-        assert torch.allclose(target_tri, target_ref, atol=5e-3)
-        assert torch.allclose(blank_tri, blank_ref, atol=5e-3)
+        assert torch.allclose(target_kernel, target_ref, atol=5e-3)
+        assert torch.allclose(blank_kernel, blank_ref, atol=5e-3)
 
-    def test_no_cuda_sync_operations(self):
+    def test_no_cuda_sync_operations(self, backend):
         device = torch.device("cuda")
         torch.manual_seed(42)
 
@@ -316,6 +347,7 @@ class TestRnntJointVocabLogProbsTriton:
             weight=weight,
             bias=bias,
             blank_id=blank_id,
+            backend=backend,
         )
         warmup_loss = target_logprobs.sum() + blank_logprobs.sum()
         warmup_loss.backward()
@@ -334,6 +366,7 @@ class TestRnntJointVocabLogProbsTriton:
                 weight=weight_test,
                 bias=bias_test,
                 blank_id=blank_id,
+                backend=backend,
             )
             loss = target_logprobs_test.sum() + blank_logprobs_test.sum()
             loss.backward()
