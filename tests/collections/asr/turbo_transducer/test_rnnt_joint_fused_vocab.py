@@ -129,10 +129,6 @@ class TestRnntJointVocabLogProbs:
             blank_kernel, blank_ref, atol=forward_atol
         ), f"blank logprobs mismatch: max diff={(blank_kernel - blank_ref).abs().max().item()}"
 
-        if not is_triton:
-            # cuTile backward is a stub returning zero gradients; skip gradient checks.
-            return
-
         torch.manual_seed(123)
         target_scales = torch.rand_like(target_ref)
         blank_scales = torch.rand_like(blank_ref)
@@ -146,14 +142,21 @@ class TestRnntJointVocabLogProbs:
         assert weight_kernel.grad.dtype == float_dtype
         assert bias_kernel.grad.dtype == float_dtype
 
-        grad_atol = 5e-3 if float_dtype == torch.bfloat16 else 1e-4
-        grad_rtol = 5e-3 if float_dtype == torch.bfloat16 else 1e-5
+        # cuTile mma uses tensor cores (bf16/TF32); Triton uses ieee strict matmul. Loosen for cuTile.
+        if float_dtype == torch.bfloat16:
+            grad_atol = 5e-3 if is_triton else 1e-1
+            grad_rtol = 5e-3
+            weight_bias_atol = 1.0 if is_triton else 5.0
+            weight_bias_rtol = 1e-3
+        else:
+            grad_atol = 1e-4 if is_triton else 1e-3
+            grad_rtol = 1e-5 if is_triton else 1e-3
+            weight_bias_atol = 1e-4 if is_triton else 1e-3
+            weight_bias_rtol = 1e-5 if is_triton else 1e-3
         assert torch.allclose(
             joint_hidden_kernel.grad.float(), joint_hidden_ref.grad.float(), atol=grad_atol, rtol=grad_rtol
         ), f"joint_hidden grad mismatch: max diff={(joint_hidden_kernel.grad.float() - joint_hidden_ref.grad.float()).abs().max().item()}"
 
-        weight_bias_atol = 1e-0 if float_dtype == torch.bfloat16 else 1e-4
-        weight_bias_rtol = 1e-3 if float_dtype == torch.bfloat16 else 1e-5
         assert torch.allclose(
             weight_kernel.grad.float(), weight_ref.grad.float(), atol=weight_bias_atol, rtol=weight_bias_rtol
         ), f"weight grad mismatch: max diff={(weight_kernel.grad.float() - weight_ref.grad.float()).abs().max().item()}"
@@ -214,9 +217,6 @@ class TestRnntJointVocabLogProbs:
         forward_atol = 1e-5 if is_triton else 5e-4
         assert torch.allclose(target_kernel, target_ref, atol=forward_atol)
         assert torch.allclose(blank_kernel, blank_ref, atol=forward_atol)
-
-        if not is_triton:
-            return
 
         target_scales = torch.rand_like(target_ref)
         blank_scales = torch.rand_like(blank_ref)

@@ -73,7 +73,9 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
 
     weight_tv = weight.tiled_view((VOCAB_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO)
     bias_tv = bias.tiled_view((VOCAB_BLOCK,), padding_mode=ct.PaddingMode.ZERO)
-    joint_hidden_2d_tv = joint_hidden_2d.tiled_view((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO)
+    joint_hidden_2d_tv = joint_hidden_2d.tiled_view(
+        (FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO
+    )
 
     for vocab_block_index in range(num_vocab_blocks):
         vocab_offsets = vocab_block_index * VOCAB_BLOCK + vocab_in_block_offsets
@@ -105,6 +107,152 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     ct.scatter(blank_logprobs_out, flattened_batch_offsets, blank_logprobs_value, mask=output_blank_mask)
     ct.scatter(target_logprobs_out, flattened_batch_offsets, target_logprobs_value, mask=output_target_mask)
     ct.scatter(log_sum_exp_out, flattened_batch_offsets, log_sum_exp_score, mask=output_blank_mask)
+
+
+@ct.kernel
+def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
+    joint_hidden_2d,
+    targets_flat,
+    src_lengths,
+    tgt_lengths,
+    weight,
+    bias,
+    log_sum_exp,
+    grad_target_scores,
+    grad_blank_scores,
+    grad_joint_hidden_2d,
+    grad_weight,
+    grad_bias,
+    flattened_batch_size,
+    max_src_len,
+    max_tgt_len_plus_1,
+    max_target_len,
+    hidden_dim: ConstInt,
+    vocab_size: ConstInt,
+    blank_id: ConstInt,
+    FLATTENED_BATCH_BLOCK: ConstInt,
+    HIDDEN_BLOCK: ConstInt,
+    VOCAB_BLOCK: ConstInt,
+    TILES_PER_SPLIT: ConstInt,
+):
+    flattened_batch_split_index = ct.bid(0)
+    vocab_block_index = ct.bid(1)
+
+    vocab_offsets = vocab_block_index * VOCAB_BLOCK + ct.arange(VOCAB_BLOCK, dtype=ct.int32)
+    vocab_mask = vocab_offsets < vocab_size
+    is_blank_vocab_col = (vocab_offsets == blank_id) & vocab_mask
+
+    num_hidden_blocks = ct.cdiv(hidden_dim, HIDDEN_BLOCK)
+    source_target_block_size = max_src_len * max_tgt_len_plus_1
+
+    weight_tv = weight.tiled_view((VOCAB_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO)
+    bias_tv = bias.tiled_view((VOCAB_BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    joint_hidden_2d_tv = joint_hidden_2d.tiled_view(
+        (FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO
+    )
+
+    bias_chunk = ct.astype(bias_tv.load((vocab_block_index,)), ct.float32)
+    grad_bias_acc = ct.zeros((VOCAB_BLOCK,), dtype=ct.float32)
+
+    for tile_local_index in range(TILES_PER_SPLIT):
+        flattened_batch_block_index = flattened_batch_split_index * TILES_PER_SPLIT + tile_local_index
+        flattened_batch_start = flattened_batch_block_index * FLATTENED_BATCH_BLOCK
+        flattened_batch_offsets = flattened_batch_start + ct.arange(FLATTENED_BATCH_BLOCK, dtype=ct.int32)
+        flattened_batch_valid_mask = flattened_batch_offsets < flattened_batch_size
+
+        batch_index = flattened_batch_offsets // source_target_block_size
+        batch_offsets_in_st = flattened_batch_offsets - batch_index * source_target_block_size
+        source_index = batch_offsets_in_st // max_tgt_len_plus_1
+        target_index = batch_offsets_in_st - source_index * max_tgt_len_plus_1
+
+        source_length = ct.gather(src_lengths, batch_index, mask=flattened_batch_valid_mask, padding_value=0)
+        target_length = ct.gather(tgt_lengths, batch_index, mask=flattened_batch_valid_mask, padding_value=0)
+
+        source_mask = source_index < source_length
+        target_valid_mask = target_index <= target_length
+        target_label_mask = target_index < target_length
+        output_blank_mask = flattened_batch_valid_mask & source_mask & target_valid_mask
+        output_target_mask = flattened_batch_valid_mask & source_mask & target_label_mask
+
+        target_flat_idx = batch_index * max_target_len + target_index
+        targets_row = ct.gather(targets_flat, target_flat_idx, mask=output_target_mask, padding_value=0)
+
+        lse = ct.astype(
+            ct.gather(log_sum_exp, flattened_batch_offsets, mask=output_blank_mask, padding_value=0.0),
+            ct.float32,
+        )
+        grad_target = ct.astype(
+            ct.gather(grad_target_scores, flattened_batch_offsets, mask=output_target_mask, padding_value=0.0),
+            ct.float32,
+        )
+        grad_blank = ct.astype(
+            ct.gather(grad_blank_scores, flattened_batch_offsets, mask=output_blank_mask, padding_value=0.0),
+            ct.float32,
+        )
+        sum_grad = grad_target + grad_blank
+
+        # Recompute logits (same matmul as forward).
+        logits_block = ct.full((FLATTENED_BATCH_BLOCK, VOCAB_BLOCK), 0.0, dtype=ct.float32) + bias_chunk[None, :]
+        for hidden_block_index in range(num_hidden_blocks):
+            hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
+            weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
+            logits_block = ct.mma(hidden_tile, ct.transpose(weight_tile), logits_block)
+
+        # Softmax gradient.
+        probabilities_block = ct.exp(logits_block - lse[:, None])
+        grad_logits_block = (
+            -(sum_grad[:, None] * probabilities_block)
+            + (grad_blank[:, None] * is_blank_vocab_col[None, :])
+            + (grad_target[:, None] * (vocab_offsets[None, :] == targets_row[:, None]))
+        )
+        grad_logits_block = ct.where(output_blank_mask[:, None] & vocab_mask[None, :], grad_logits_block, 0.0)
+        grad_bias_acc += ct.sum(grad_logits_block, axis=0)
+
+        # Cast grad_logits to weight dtype for the backward matmuls (matches Triton's matmul_dtype when not high precision).
+        grad_logits_for_mm = ct.astype(grad_logits_block, weight.dtype)
+        grad_logits_for_mm_t = ct.transpose(grad_logits_for_mm)
+
+        for hidden_block_index in range(num_hidden_blocks):
+            weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
+            hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
+
+            grad_hidden_delta = ct.mma(
+                grad_logits_for_mm,
+                weight_tile,
+                ct.zeros((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
+            )
+            grad_weight_delta = ct.mma(
+                grad_logits_for_mm_t,
+                hidden_tile,
+                ct.zeros((VOCAB_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
+            )
+
+            hidden_offsets = hidden_block_index * HIDDEN_BLOCK + ct.arange(HIDDEN_BLOCK, dtype=ct.int32)
+
+            ct.atomic_add(
+                grad_joint_hidden_2d,
+                (flattened_batch_offsets[:, None], hidden_offsets[None, :]),
+                grad_hidden_delta,
+                memory_order=ct.MemoryOrder.RELAXED,
+            )
+            ct.atomic_add(
+                grad_weight,
+                (vocab_offsets[:, None], hidden_offsets[None, :]),
+                grad_weight_delta,
+                memory_order=ct.MemoryOrder.RELAXED,
+            )
+
+    ct.atomic_add(grad_bias, vocab_offsets, grad_bias_acc, memory_order=ct.MemoryOrder.RELAXED)
+
+
+_FORWARD_FLATTENED_BATCH_BLOCK = 64
+_FORWARD_HIDDEN_BLOCK = 128
+_FORWARD_VOCAB_BLOCK = 64
+
+_BACKWARD_FLATTENED_BATCH_BLOCK = 128
+_BACKWARD_HIDDEN_BLOCK = 64
+_BACKWARD_VOCAB_BLOCK = 64
+_BACKWARD_FLATTENED_BATCH_SPLITS = 64
 
 
 class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
@@ -145,10 +293,9 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        FLATTENED_BATCH_BLOCK = 64
-        HIDDEN_BLOCK = 128
-        VOCAB_BLOCK = 64
-        flattened_batch_blocks = (flattened_batch_size + FLATTENED_BATCH_BLOCK - 1) // FLATTENED_BATCH_BLOCK
+        flattened_batch_blocks = (
+            flattened_batch_size + _FORWARD_FLATTENED_BATCH_BLOCK - 1
+        ) // _FORWARD_FLATTENED_BATCH_BLOCK
 
         ct.launch(
             torch.cuda.current_stream(),
@@ -171,22 +318,92 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
                 hidden_dim,
                 vocab_size,
                 blank_id,
-                FLATTENED_BATCH_BLOCK,
-                HIDDEN_BLOCK,
-                VOCAB_BLOCK,
+                _FORWARD_FLATTENED_BATCH_BLOCK,
+                _FORWARD_HIDDEN_BLOCK,
+                _FORWARD_VOCAB_BLOCK,
             ),
         )
 
-        ctx.save_for_backward(joint_hidden, weight, bias)
+        ctx.save_for_backward(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores)
+        ctx.blank_id = blank_id
+        ctx.src_max_length = src_max_length
+        ctx.tgt_max_length_plus_1 = tgt_max_length_plus_1
         return target_logprobs, blank_logprobs
 
     @staticmethod
     def backward(ctx, grad_target_scores, grad_blank_scores):
-        # Stub: real backward not implemented yet — return zero gradients matching input dtypes.
-        joint_hidden, weight, bias = ctx.saved_tensors
-        grad_joint_hidden = torch.zeros_like(joint_hidden)
-        grad_weight = torch.zeros_like(weight)
-        grad_bias = torch.zeros_like(bias)
+        (
+            joint_hidden,
+            weight,
+            bias,
+            targets,
+            src_lengths,
+            tgt_lengths,
+            log_sum_exp_scores,
+        ) = ctx.saved_tensors
+        blank_id = ctx.blank_id
+        src_max_length = ctx.src_max_length
+        tgt_max_length_plus_1 = ctx.tgt_max_length_plus_1
+
+        grad_target_scores = grad_target_scores.contiguous()
+        grad_blank_scores = grad_blank_scores.contiguous()
+
+        batch_size, _, _, hidden_dim = joint_hidden.shape
+        flattened_batch_size = batch_size * src_max_length * tgt_max_length_plus_1
+        max_target_len = tgt_max_length_plus_1 - 1
+        vocab_size = weight.shape[0]
+        device = joint_hidden.device
+        float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
+
+        # Accumulate gradients in fp32; cast back to input dtypes on exit.
+        grad_joint_hidden = torch.zeros([flattened_batch_size, hidden_dim], dtype=float_dtype, device=device)
+        grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
+        grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
+
+        total_batch_tiles = (
+            flattened_batch_size + _BACKWARD_FLATTENED_BATCH_BLOCK - 1
+        ) // _BACKWARD_FLATTENED_BATCH_BLOCK
+        tiles_per_split = (
+            total_batch_tiles + _BACKWARD_FLATTENED_BATCH_SPLITS - 1
+        ) // _BACKWARD_FLATTENED_BATCH_SPLITS
+        vocab_blocks = (vocab_size + _BACKWARD_VOCAB_BLOCK - 1) // _BACKWARD_VOCAB_BLOCK
+
+        ct.launch(
+            torch.cuda.current_stream(),
+            (_BACKWARD_FLATTENED_BATCH_SPLITS, vocab_blocks, 1),
+            _rnnt_joint_fused_vocab_bwd_cutile_kernel,
+            (
+                joint_hidden.view(flattened_batch_size, hidden_dim),
+                targets.view(-1),
+                src_lengths,
+                tgt_lengths,
+                weight,
+                bias,
+                log_sum_exp_scores.view(-1),
+                grad_target_scores.view(-1),
+                grad_blank_scores.view(-1),
+                grad_joint_hidden,
+                grad_weight,
+                grad_bias,
+                flattened_batch_size,
+                src_max_length,
+                tgt_max_length_plus_1,
+                max_target_len,
+                hidden_dim,
+                vocab_size,
+                blank_id,
+                _BACKWARD_FLATTENED_BATCH_BLOCK,
+                _BACKWARD_HIDDEN_BLOCK,
+                _BACKWARD_VOCAB_BLOCK,
+                tiles_per_split,
+            ),
+        )
+
+        grad_joint_hidden = grad_joint_hidden.view(batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim)
+        grad_joint_hidden = grad_joint_hidden.to(joint_hidden.dtype)
+        grad_weight = grad_weight.to(weight.dtype)
+        grad_bias = grad_bias.to(bias.dtype)
+
         return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None
 
 
