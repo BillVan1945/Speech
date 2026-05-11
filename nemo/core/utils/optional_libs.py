@@ -36,6 +36,8 @@ __all__ = [
     # numba-cuda
     "NUMBA_CUDA_AVAILABLE",
     "numba_cuda_required",
+    # cuTile
+    "CUTILE_AVAILABLE",
 ]
 
 import importlib.util
@@ -92,6 +94,13 @@ except (ImportError, ModuleNotFoundError):
     CUDA_PYTHON_AVAILABLE = False
 
 CUDA_PYTHON_INSTALLATION_MESSAGE = "Try installing cuda-python with `pip install cuda-python>=12.6.0`"
+
+try:
+    import cuda.tile as _  # noqa: F401
+    # TODO: check CUDA 13.2+
+    CUTILE_AVAILABLE = True
+except (ImportError, ModuleNotFoundError):
+    CUTILE_AVAILABLE = False
 
 
 def identity_decorator(f):

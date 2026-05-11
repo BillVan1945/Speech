@@ -31,8 +31,8 @@ import torch
 import torch.nn.functional as F
 
 from nemo.collections.asr.losses.rnnt import RNNTLoss
-from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_triton import rnnt_joint_logprobs_triton
 from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
+from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_triton import rnnt_joint_logprobs_triton
 from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_from_logprobs_triton
 
 

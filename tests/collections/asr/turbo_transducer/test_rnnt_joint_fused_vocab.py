@@ -16,14 +16,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import rnnt_joint_fused_vocab
 from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import rnnt_logprobs_torch
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 from tests.collections.asr.decoding.utils import avoid_sync_operations
-
-if TRITON_AVAILABLE:
-    from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import (
-        rnnt_joint_fused_vocab_triton,
-    )
 
 
 def _reference_joint_vocab_logprobs(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, blank_id):
@@ -94,7 +90,7 @@ class TestRnntJointVocabLogProbsTriton:
         joint_hidden_tri = joint_hidden.detach().clone().requires_grad_(True)
         weight_tri = weight.detach().clone().requires_grad_(True)
         bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_fused_vocab_triton(
+        target_tri, blank_tri = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden_tri,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -178,7 +174,7 @@ class TestRnntJointVocabLogProbsTriton:
         joint_hidden_tri = joint_hidden.detach().clone().requires_grad_(True)
         weight_tri = weight.detach().clone().requires_grad_(True)
         bias_tri = bias.detach().clone().requires_grad_(True)
-        target_tri, blank_tri = rnnt_joint_fused_vocab_triton(
+        target_tri, blank_tri = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden_tri,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -233,7 +229,7 @@ class TestRnntJointVocabLogProbsTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_fused_vocab_triton(
+        target_tri, blank_tri = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -277,7 +273,7 @@ class TestRnntJointVocabLogProbsTriton:
             tgt_lengths=tgt_lengths,
             blank_id=blank_id,
         )
-        target_tri, blank_tri = rnnt_joint_fused_vocab_triton(
+        target_tri, blank_tri = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -312,7 +308,7 @@ class TestRnntJointVocabLogProbsTriton:
         tgt_lengths = torch.full([batch_size], tgt_length, device=device, dtype=torch.long)
 
         # Warmup
-        target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_triton(
+        target_logprobs, blank_logprobs = rnnt_joint_fused_vocab(
             joint_hidden=joint_hidden,
             targets=targets,
             tgt_lengths=tgt_lengths,
@@ -330,7 +326,7 @@ class TestRnntJointVocabLogProbsTriton:
         bias_test = bias.detach().clone().requires_grad_(True)
 
         with avoid_sync_operations(device):
-            target_logprobs_test, blank_logprobs_test = rnnt_joint_fused_vocab_triton(
+            target_logprobs_test, blank_logprobs_test = rnnt_joint_fused_vocab(
                 joint_hidden=joint_hidden_test,
                 targets=targets,
                 tgt_lengths=tgt_lengths,
