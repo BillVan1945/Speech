@@ -39,16 +39,16 @@ from tests.collections.asr.turbo_transducer.benchmark_rnnt_joint import (
 
 # Vocab sizes include the blank symbol. `num_classes = vocab_size - 1` is what
 # `run_benchmark` expects (blank_id == num_classes).
-VOCAB_SIZES: tuple[int, ...] = (1024, 1025, 8192, 8193)
+VOCAB_SIZES: list[int] = [1024, 1025, 8192, 8193]
 
 # Each entry is (joint, joint_backend, loss). Ordering preserved within each
 # vocab group in the printed/CSV output.
-EXPERIMENTS: tuple[tuple[str, str, str], ...] = (
+EXPERIMENTS: list[tuple[str, str, str]] = [
     ("standard", "-", "warprnnt_numba"),
     ("standard", "-", "rnnt_triton"),
     ("fused_vocab", "triton", "rnnt_triton"),
     ("fused", "triton", "rnnt_triton"),
-)
+]
 
 # Tensor shape / training-knob defaults from `_dev/flow/projects/turbo_transducer/main.md`.
 BATCH_SIZE: int = 64
