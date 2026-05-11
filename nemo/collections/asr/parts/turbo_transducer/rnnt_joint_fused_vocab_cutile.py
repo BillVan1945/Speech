@@ -71,32 +71,21 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     num_hidden_blocks = ct.cdiv(hidden_dim, HIDDEN_BLOCK)
     vocab_in_block_offsets = ct.arange(VOCAB_BLOCK, dtype=ct.int32)
 
+    weight_tv = weight.tiled_view((VOCAB_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO)
+    bias_tv = bias.tiled_view((VOCAB_BLOCK,), padding_mode=ct.PaddingMode.ZERO)
+    joint_hidden_2d_tv = joint_hidden_2d.tiled_view((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO)
+
     for vocab_block_index in range(num_vocab_blocks):
         vocab_offsets = vocab_block_index * VOCAB_BLOCK + vocab_in_block_offsets
         vocab_mask = vocab_offsets < vocab_size
 
-        bias_chunk = ct.load(
-            bias,
-            (vocab_block_index,),
-            (VOCAB_BLOCK,),
-            padding_mode=ct.PaddingMode.ZERO,
-        )
+        bias_chunk = bias_tv.load((vocab_block_index,))
         bias_chunk_f32 = ct.astype(bias_chunk, ct.float32)
         block_logits = ct.full((FLATTENED_BATCH_BLOCK, VOCAB_BLOCK), 0.0, dtype=ct.float32) + bias_chunk_f32[None, :]
 
         for hidden_block_index in range(num_hidden_blocks):
-            hidden_tile = ct.load(
-                joint_hidden_2d,
-                (flattened_batch_block_index, hidden_block_index),
-                (FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK),
-                padding_mode=ct.PaddingMode.ZERO,
-            )
-            weight_tile = ct.load(
-                weight,
-                (vocab_block_index, hidden_block_index),
-                (VOCAB_BLOCK, HIDDEN_BLOCK),
-                padding_mode=ct.PaddingMode.ZERO,
-            )
+            hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
+            weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
             block_logits = ct.mma(hidden_tile, ct.transpose(weight_tile), block_logits)
 
         block_logits = ct.where(vocab_mask[None, :], block_logits, float("-inf"))
@@ -156,8 +145,8 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        FLATTENED_BATCH_BLOCK = 128
-        HIDDEN_BLOCK = 64
+        FLATTENED_BATCH_BLOCK = 64
+        HIDDEN_BLOCK = 128
         VOCAB_BLOCK = 64
         flattened_batch_blocks = (flattened_batch_size + FLATTENED_BATCH_BLOCK - 1) // FLATTENED_BATCH_BLOCK
 
