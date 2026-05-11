@@ -202,3 +202,9 @@ docs = [
     "sphinxcontrib-bibtex",
     "sphinxext-opengraph"
 ]
+
+[tool.basedpyright]
+typeCheckingMode = "basic"
+reportMissingTypeStubs = "none"
+reportPrivateImportUsage = "none"
+reportUnreachable = "none"
