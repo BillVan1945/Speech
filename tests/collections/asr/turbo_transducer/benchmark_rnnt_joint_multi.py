@@ -1,0 +1,126 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""
+Multi-config RNN-T Joint benchmark.
+
+The experiment matrix is a module-level constant — edit the constants below
+to change what gets benchmarked. The script then sweeps `VOCAB_SIZES` x
+`EXPERIMENTS`, prints one aggregated table (ordered by vocab), and
+optionally writes a CSV.
+
+Usage:
+    python benchmark_rnnt_joint_multi.py --csv-output _checks/benchmark.csv
+"""
+
+import argparse
+import sys
+
+import torch
+
+from tests.collections.asr.turbo_transducer.benchmark_rnnt_joint import (
+    BenchmarkResults,
+    get_dtype,
+    print_results_table,
+    run_benchmark,
+    write_csv,
+)
+
+# Vocab sizes include the blank symbol. `num_classes = vocab_size - 1` is what
+# `run_benchmark` expects (blank_id == num_classes).
+VOCAB_SIZES: tuple[int, ...] = (1024, 1025, 8192, 8193)
+
+# Each entry is (joint, joint_backend, loss). Ordering preserved within each
+# vocab group in the printed/CSV output.
+EXPERIMENTS: tuple[tuple[str, str, str], ...] = (
+    ("standard", "-", "warprnnt_numba"),
+    ("standard", "-", "rnnt_triton"),
+    ("fused_vocab", "triton", "rnnt_triton"),
+    ("fused", "triton", "rnnt_triton"),
+)
+
+# Tensor shape / training-knob defaults from `_dev/flow/projects/turbo_transducer/main.md`.
+BATCH_SIZE: int = 64
+MAX_TIME: int = 150
+MAX_TARGETS: int = 72
+HIDDEN_DIM: int = 640
+DROPOUT_P: float = 0.2
+DTYPE: str = "bfloat16"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Multi-config RNN-T Joint benchmark sweep")
+    parser.add_argument("--csv-output", type=str, default=None, help="Optional path to write CSV")
+    parser.add_argument("--warmup-iterations", type=int, default=10)
+    parser.add_argument("--benchmark-iterations", type=int, default=100)
+    parser.add_argument(
+        "-fo", "--forward-only", action="store_true", help="Benchmark forward pass only (skip backward)"
+    )
+    parser.add_argument("--no-dropout", action="store_true", help="Disable dropout (enabled by default, p=0.2)")
+    args = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        print("ERROR: CUDA is not available.")
+        sys.exit(1)
+
+    gpu_name = torch.cuda.get_device_name(0)
+    dtype = get_dtype(DTYPE)
+    dropout_p = 0.0 if args.no_dropout else DROPOUT_P
+
+    print(f"\nGPU: {gpu_name}")
+    print(
+        f"Sweep: {len(VOCAB_SIZES)} vocab sizes x {len(EXPERIMENTS)} experiments "
+        f"= {len(VOCAB_SIZES) * len(EXPERIMENTS)} runs"
+    )
+    print(
+        f"Shape: enc=[{BATCH_SIZE}, {MAX_TIME}, {HIDDEN_DIM}], "
+        f"pred=[{BATCH_SIZE}, {MAX_TARGETS + 1}, {HIDDEN_DIM}], dtype={DTYPE}, dropout_p={dropout_p}"
+    )
+
+    torch.manual_seed(42)
+
+    results: list[BenchmarkResults] = []
+    for vocab_size in VOCAB_SIZES:
+        for joint, joint_backend, loss in EXPERIMENTS:
+            print(
+                f"\n[{len(results) + 1}/{len(VOCAB_SIZES) * len(EXPERIMENTS)}] "
+                f"vocab={vocab_size}, joint={joint}, backend={joint_backend}, loss={loss}"
+            )
+            result = run_benchmark(
+                joint=joint,
+                loss=loss,
+                dtype=dtype,
+                joint_backend=joint_backend,
+                warmup_iters=args.warmup_iterations,
+                bench_iters=args.benchmark_iterations,
+                batch_size=BATCH_SIZE,
+                max_time=MAX_TIME,
+                hidden_dim=HIDDEN_DIM,
+                num_classes=vocab_size - 1,
+                max_targets=MAX_TARGETS,
+                forward_only=args.forward_only,
+                dropout_p=dropout_p,
+            )
+            results.append(result)
+
+    print()
+    print_results_table(results)
+
+    if args.csv_output:
+        write_csv(results, args.csv_output)
+        print(f"\nCSV written: {args.csv_output}")
+
+
+if __name__ == "__main__":
+    main()
