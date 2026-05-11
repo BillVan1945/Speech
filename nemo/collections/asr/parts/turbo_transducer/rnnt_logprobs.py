@@ -22,22 +22,22 @@ from nemo.utils.nemo_logging import LogMode
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs_triton import rnnt_logprobs_triton
 
+
 def get_rnnt_mask(
-        batch_size: int,
-        src_length_max: int,
-        tgt_length_max_plus_1: int,
-        device: torch.device,
-        src_lengths: torch.Tensor | None = None,
-        tgt_lengths: torch.Tensor | None = None):
+    batch_size: int,
+    src_length_max: int,
+    tgt_length_max_plus_1: int,
+    device: torch.device,
+    src_lengths: torch.Tensor | None = None,
+    tgt_lengths: torch.Tensor | None = None,
+):
     if src_lengths is not None:
         mask_src = torch.arange(src_length_max, device=device)[None, :] < src_lengths[:, None]
     else:
         mask_src = torch.ones([batch_size, src_length_max], dtype=torch.bool, device=device)
     if tgt_lengths is not None:
         mask_tgt_nb = torch.arange(tgt_length_max_plus_1, device=device)[None, :] < tgt_lengths[:, None]
-        mask_tgt_blank = (
-                torch.arange(tgt_length_max_plus_1, device=device)[None, :] < (tgt_lengths[:, None] + 1)
-        )
+        mask_tgt_blank = torch.arange(tgt_length_max_plus_1, device=device)[None, :] < (tgt_lengths[:, None] + 1)
     else:
         mask_tgt_nb = torch.ones([batch_size, tgt_length_max_plus_1], dtype=torch.bool, device=device)
         mask_tgt_nb[:, -1] = False

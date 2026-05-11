@@ -33,6 +33,7 @@ from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import Consist
 @dataclass
 class BenchmarkResults:
     """Container for benchmark results."""
+
     dtype: str
     symmetrical: bool
     use_triton: bool
@@ -96,13 +97,9 @@ def benchmark_consistency_loss(
 
     # Create input tensors
     torch.manual_seed(42)
-    teacher_logits = torch.randn(
-        batch_size, max_time, max_target_plus_1, vocab_size,
-        device=device, dtype=dtype
-    )
+    teacher_logits = torch.randn(batch_size, max_time, max_target_plus_1, vocab_size, device=device, dtype=dtype)
     student_logits = torch.randn(
-        batch_size, max_time, max_target_plus_1, vocab_size,
-        device=device, dtype=dtype, requires_grad=True
+        batch_size, max_time, max_target_plus_1, vocab_size, device=device, dtype=dtype, requires_grad=True
     )
 
     # Measure input memory
@@ -200,9 +197,9 @@ def benchmark_consistency_loss(
     avg_backward_time = sum(backward_times) / len(backward_times)
 
     # Memory calculations
-    input_memory_gb = input_memory / (1024 ** 3)
-    forward_memory_gb = forward_memory / (1024 ** 3)
-    backward_peak_memory_gb = backward_peak_memory / (1024 ** 3)
+    input_memory_gb = input_memory / (1024**3)
+    forward_memory_gb = forward_memory / (1024**3)
+    backward_peak_memory_gb = backward_peak_memory / (1024**3)
 
     dtype_str = 'float32' if dtype == torch.float32 else 'bfloat16'
 
@@ -243,76 +240,30 @@ def print_results(results: BenchmarkResults):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='Benchmark Triton vs PyTorch consistency loss implementations'
-    )
+    parser = argparse.ArgumentParser(description='Benchmark Triton vs PyTorch consistency loss implementations')
     parser.add_argument(
         '--dtype',
         type=str,
         default='float32',
         choices=['float32', 'fp32', 'bfloat16', 'bf16'],
-        help='Data type for tensors (default: float32)'
+        help='Data type for tensors (default: float32)',
     )
+    parser.add_argument('--symmetrical', action='store_true', dest='symmetrical', help='Use symmetric KL divergence')
     parser.add_argument(
-        '--symmetrical',
-        action='store_true',
-        dest='symmetrical',
-        help='Use symmetric KL divergence'
+        '--no-symmetrical', action='store_false', dest='symmetrical', help='Use asymmetric KL divergence'
     )
+    parser.add_argument('--use-triton', action='store_true', dest='use_triton', help='Use Triton implementation')
+    parser.add_argument('--no-use-triton', action='store_false', dest='use_triton', help='Use PyTorch implementation')
+    parser.add_argument('--warmup-iterations', type=int, default=10, help='Number of warmup iterations (default: 10)')
     parser.add_argument(
-        '--no-symmetrical',
-        action='store_false',
-        dest='symmetrical',
-        help='Use asymmetric KL divergence'
+        '--benchmark-iterations', type=int, default=100, help='Number of benchmark iterations (default: 100)'
     )
+    parser.add_argument('--batch-size', type=int, default=16, help='Batch size (default: 16)')
+    parser.add_argument('--max-time', type=int, default=129, help='Maximum time dimension T (default: 129)')
     parser.add_argument(
-        '--use-triton',
-        action='store_true',
-        dest='use_triton',
-        help='Use Triton implementation'
+        '--max-target-plus-1', type=int, default=65, help='Maximum target dimension + 1 (U+1) (default: 65)'
     )
-    parser.add_argument(
-        '--no-use-triton',
-        action='store_false',
-        dest='use_triton',
-        help='Use PyTorch implementation'
-    )
-    parser.add_argument(
-        '--warmup-iterations',
-        type=int,
-        default=10,
-        help='Number of warmup iterations (default: 10)'
-    )
-    parser.add_argument(
-        '--benchmark-iterations',
-        type=int,
-        default=100,
-        help='Number of benchmark iterations (default: 100)'
-    )
-    parser.add_argument(
-        '--batch-size',
-        type=int,
-        default=16,
-        help='Batch size (default: 16)'
-    )
-    parser.add_argument(
-        '--max-time',
-        type=int,
-        default=129,
-        help='Maximum time dimension T (default: 129)'
-    )
-    parser.add_argument(
-        '--max-target-plus-1',
-        type=int,
-        default=65,
-        help='Maximum target dimension + 1 (U+1) (default: 65)'
-    )
-    parser.add_argument(
-        '--vocab-size',
-        type=int,
-        default=2048,
-        help='Vocabulary size V (default: 2048)'
-    )
+    parser.add_argument('--vocab-size', type=int, default=2048, help='Vocabulary size V (default: 2048)')
 
     parser.set_defaults(symmetrical=False, use_triton=False)
     args = parser.parse_args()

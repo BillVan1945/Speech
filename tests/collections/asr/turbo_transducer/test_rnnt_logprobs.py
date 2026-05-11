@@ -23,6 +23,7 @@ from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs_triton import rnnt_logprobs_triton
 
+
 @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed, skipping RNNT Log Probs tests")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 class TestRnntLogProbs:

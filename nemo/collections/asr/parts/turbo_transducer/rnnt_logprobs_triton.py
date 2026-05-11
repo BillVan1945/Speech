@@ -191,9 +191,7 @@ class RnntLogProbs(torch.autograd.Function):
         else:
             src_lengths = src_lengths.contiguous()
         if tgt_lengths is None:
-            tgt_lengths = torch.full(
-                [logits.shape[0]], fill_value=logits.shape[2] - 1, dtype=torch.int, device=device
-            )
+            tgt_lengths = torch.full([logits.shape[0]], fill_value=logits.shape[2] - 1, dtype=torch.int, device=device)
         else:
             tgt_lengths = tgt_lengths.contiguous()
 

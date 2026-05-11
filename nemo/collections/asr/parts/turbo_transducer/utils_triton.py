@@ -61,6 +61,7 @@ def sum_at_block(x: tl.tensor, y: tl.tensor, block_id, axis: tl.constexpr):
         x.shape
     )
 
+
 @triton.jit
 def dropout_scale_mask_kernel(
     mask_out_ptr,

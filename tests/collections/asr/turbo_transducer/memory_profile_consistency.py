@@ -46,7 +46,7 @@ def profile_memory(symmetric: bool, dtype: torch.dtype = torch.float32):
     B, T, U, V = 16, 129, 65, 2048
     dtype_str = "float32" if dtype == torch.float32 else "bfloat16"
     bytes_per_element = 4 if dtype == torch.float32 else 2
-    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024 ** 3)
+    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024**3)
 
     print(f"\n{'='*70}")
     print(f"Memory Profile: symmetric={symmetric}, dtype={dtype_str}")
@@ -148,7 +148,7 @@ def profile_with_teacher_grad(symmetric: bool, dtype: torch.dtype = torch.float3
     B, T, U, V = 16, 129, 65, 2048
     dtype_str = "float32" if dtype == torch.float32 else "bfloat16"
     bytes_per_element = 4 if dtype == torch.float32 else 2
-    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024 ** 3)
+    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024**3)
 
     print(f"\n{'='*70}")
     print(f"Memory Profile (TEACHER REQUIRES GRAD): symmetric={symmetric}, dtype={dtype_str}")
@@ -208,7 +208,7 @@ def profile_benchmark_clone_impact():
     B, T, U, V = 16, 129, 65, 2048
     dtype = torch.float32
     bytes_per_element = 4
-    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024 ** 3)
+    tensor_size_gb = (B * T * U * V * bytes_per_element) / (1024**3)
 
     print(f"\n{'='*70}")
     print(f"Clone Impact Analysis")
@@ -257,9 +257,9 @@ def profile_benchmark_clone_impact():
 
 
 if __name__ == "__main__":
-    print("="*70)
+    print("=" * 70)
     print("MEMORY PROFILING: Triton Consistency Loss")
-    print("="*70)
+    print("=" * 70)
 
     # Profile both modes without clone (direct usage)
     results_nonsym = profile_memory(symmetric=False)

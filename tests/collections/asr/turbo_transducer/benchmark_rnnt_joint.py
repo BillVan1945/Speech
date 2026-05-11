@@ -16,11 +16,11 @@
 Benchmark script comparing standard joint + loss vs fused Triton joint + loss.
 
 Usage:
-    python benchmark_rnnt_joint.py --joint standard --loss turbo_transducer --dtype float32
-    python benchmark_rnnt_joint.py --joint triton --loss turbo_transducer --dtype float32
-    python benchmark_rnnt_joint.py --joint triton_vocab --loss turbo_transducer --dtype bfloat16
+    python benchmark_rnnt_joint.py --joint standard --loss rnnt_triton --dtype float32
+    python benchmark_rnnt_joint.py --joint fused --loss rnnt_triton --dtype float32
+    python benchmark_rnnt_joint.py --joint fused_vocab --loss rnnt_triton --dtype bfloat16
     python benchmark_rnnt_joint.py --joint standard --loss warprnnt_numba --dtype bfloat16
-    python benchmark_rnnt_joint.py --joint triton --dtype float32 -fo  # forward only
+    python benchmark_rnnt_joint.py --joint fused --dtype float32 -fo  # forward only
 """
 
 import argparse
@@ -31,8 +31,8 @@ import torch
 import torch.nn.functional as F
 
 from nemo.collections.asr.losses.rnnt import RNNTLoss
+from nemo.collections.asr.parts.turbo_transducer.rnnt_fused_joint import rnnt_fused_joint_triton
 from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
-from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_triton import rnnt_joint_logprobs_triton
 from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_from_logprobs_triton
 
 
@@ -213,7 +213,7 @@ def benchmark_standard_joint(
     )
 
 
-def benchmark_triton_joint(
+def benchmark_fused_joint(
     dtype: torch.dtype,
     warmup_iters: int = 10,
     bench_iters: int = 100,
@@ -240,7 +240,7 @@ def benchmark_triton_joint(
     tgt_lengths = torch.full([batch_size], max_targets, device=device, dtype=torch.long)
 
     def run_fwd():
-        target_logprobs, blank_logprobs = rnnt_joint_logprobs_triton(
+        target_logprobs, blank_logprobs = rnnt_fused_joint_triton(
             encoder_output_projected=enc_proj,
             predictor_output_projected=pred_proj,
             targets=targets,
@@ -346,7 +346,7 @@ def benchmark_triton_joint(
     dtype_str = 'float32' if dtype == torch.float32 else 'bfloat16'
     return BenchmarkResults(
         joint='triton',
-        loss='turbo_transducer',
+        loss='rnnt_triton',
         dtype=dtype_str,
         batch_size=batch_size,
         max_time=max_time,
@@ -362,7 +362,7 @@ def benchmark_triton_joint(
     )
 
 
-def benchmark_triton_vocab_joint(
+def benchmark_joint_fused_vocab(
     loss_name: str,
     dtype: torch.dtype,
     warmup_iters: int = 10,
@@ -375,8 +375,8 @@ def benchmark_triton_vocab_joint(
     forward_only: bool = False,
     dropout_p: float = 0.2,
 ) -> BenchmarkResults:
-    if loss_name != 'turbo_transducer':
-        raise ValueError("Joint implementation `triton_vocab` supports only `turbo_transducer` loss.")
+    if loss_name != 'rnnt_triton':
+        raise ValueError("Joint implementation `fused_vocab` supports only `rnnt_triton` loss.")
 
     device = torch.device('cuda')
     vocab_size = num_classes + 1
@@ -493,8 +493,8 @@ def benchmark_triton_vocab_joint(
     avg_bwd = sum(backward_times) / len(backward_times) if backward_times else 0.0
     dtype_str = 'float32' if dtype == torch.float32 else 'bfloat16'
     return BenchmarkResults(
-        joint='triton_vocab',
-        loss='turbo_transducer',
+        joint='fused_vocab',
+        loss='rnnt_triton',
         dtype=dtype_str,
         batch_size=batch_size,
         max_time=max_time,
@@ -558,14 +558,21 @@ def main():
         '--joint',
         type=str,
         required=True,
-        choices=['standard', 'triton', 'triton_vocab'],
+        choices=['standard', 'fused', 'fused_vocab'],
         help='Joint implementation to benchmark',
+    )
+    parser.add_argument(
+        '--joint-backend',
+        type=str,
+        default='triton',
+        choices=['triton', 'cutile'],
+        help='Joint backend implementation to benchmark',
     )
     parser.add_argument(
         '--loss',
         type=str,
-        default='turbo_transducer',
-        choices=['warprnnt_numba', 'turbo_transducer'],
+        default='rnnt_triton',
+        choices=['warprnnt_numba', 'rnnt_triton'],
         help='Loss implementation',
     )
     parser.add_argument(
@@ -615,10 +622,10 @@ def main():
             forward_only=args.forward_only,
             dropout_p=dropout_p,
         )
-    elif args.joint == 'triton':
-        if args.loss != 'turbo_transducer':
-            raise ValueError("Joint implementation `triton` supports only `turbo_transducer` loss.")
-        results = benchmark_triton_joint(
+    elif args.joint == 'fused':
+        if args.loss != 'rnnt_triton':
+            raise ValueError("Joint implementation `triton` supports only `rnnt_triton` loss.")
+        results = benchmark_fused_joint(
             dtype=dtype,
             warmup_iters=args.warmup_iterations,
             bench_iters=args.benchmark_iterations,
@@ -631,7 +638,7 @@ def main():
             dropout_p=dropout_p,
         )
     else:
-        results = benchmark_triton_vocab_joint(
+        results = benchmark_joint_fused_vocab(
             loss_name=args.loss,
             dtype=dtype,
             warmup_iters=args.warmup_iterations,
