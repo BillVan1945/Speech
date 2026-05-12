@@ -87,8 +87,8 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
 
         for hidden_block_index in range(num_hidden_blocks):
             hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
-            weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
-            block_logits = ct.mma(hidden_tile, ct.transpose(weight_tile), block_logits)
+            weight_tile_t = ct.transpose(weight_tv.load((vocab_block_index, hidden_block_index)))
+            block_logits = ct.mma(hidden_tile, weight_tile_t, block_logits)
 
         block_logits = ct.where(vocab_mask[None, :], block_logits, float("-inf"))
 

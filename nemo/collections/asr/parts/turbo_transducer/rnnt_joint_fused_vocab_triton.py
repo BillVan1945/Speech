@@ -122,10 +122,10 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
         block_logits = tl.zeros([FLATTENED_BATCH_BLOCK, VOCAB_BLOCK], dtype=compute_dtype) + bias_chunk[None, :]
         for _ in tl.range(0, hidden_dim, HIDDEN_BLOCK):
             hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
-            weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype).T
 
             block_logits += matmul(
-                hidden_chunk, weight_chunk.T, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
+                hidden_chunk, weight_chunk_t, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
             ).to(compute_dtype)
 
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, HIDDEN_BLOCK))
@@ -294,10 +294,10 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
             # hidden_chunk: [FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK]
             hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
             # weight_chunk: [VOCAB_BLOCK, HIDDEN_BLOCK]
-            weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
             logits_block += matmul(
-                hidden_chunk, weight_chunk.T, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
+                hidden_chunk, weight_chunk_t, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
             ).to(compute_dtype)
 
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, HIDDEN_BLOCK))
@@ -337,11 +337,11 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
             )
 
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, -HIDDEN_BLOCK))
-            joint_hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            joint_hidden_chunk_t = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
             grad_weight_delta = matmul(
-                grad_logits_matmul.T, joint_hidden_chunk, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).to(compute_dtype)
+                joint_hidden_chunk_t, grad_logits_matmul, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
+            ).T.to(compute_dtype)
 
             tl.atomic_add(
                 grad_weight_out_ptr + vocab_offsets[:, None] * hidden_dim + hidden_offsets[None, :],
