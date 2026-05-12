@@ -438,8 +438,8 @@ def main():
     parser.add_argument('--max-targets', type=int, default=72, help='Maximum target sequence length (default: 72)')
     parser.add_argument('--hidden-dim', type=int, default=640)
     parser.add_argument('--num-classes', type=int, default=1024, help='Vocab size minus blank (blank_id=num_classes)')
-    parser.add_argument('--warmup-iterations', type=int, default=10)
-    parser.add_argument('--benchmark-iterations', type=int, default=100)
+    parser.add_argument('-wi', '--warmup-iterations', type=int, default=10)
+    parser.add_argument('-bi', '--benchmark-iterations', type=int, default=100)
     parser.add_argument(
         '-fo', '--forward-only', action='store_true', help='Benchmark forward pass only (skip backward)'
     )
