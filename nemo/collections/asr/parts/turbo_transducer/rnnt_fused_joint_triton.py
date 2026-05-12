@@ -565,7 +565,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         VOCAB_BLOCK = 64
         HIDDEN_BLOCK = 64
         ENCODER_BLOCK = 16
-        PREDICTOR_BLOCK = 16
+        PREDICTOR_BLOCK = 8
         forward_num_stages = 1 if use_high_precision else 2
         num_warps = 4
 
