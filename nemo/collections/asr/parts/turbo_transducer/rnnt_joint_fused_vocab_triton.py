@@ -24,16 +24,9 @@ def _fwd_autotune_configs():
     configs = []
     # (FB, HB, VB, num_warps, num_stages)
     candidates = [
-        (128, 64, 64, 4, 2),
-        (128, 64, 64, 4, 3),
-        (128, 64, 128, 4, 2),
-        (128, 64, 128, 8, 2),
-        (64, 64, 128, 4, 2),
-        (64, 64, 128, 4, 3),
-        (64, 64, 256, 8, 2),
-        (128, 32, 128, 4, 3),  # current best for vocab_size=1024,8192
-        (128, 128, 64, 4, 2),
-        (64, 128, 128, 8, 2),
+        (32, 32, 32, 4, 3),
+        (64, 32, 64, 4, 3),
+        (128, 32, 128, 4, 3),
     ]
     for fb, hb, vb, nw, ns in candidates:
         configs.append(
@@ -50,19 +43,9 @@ def _bwd_autotune_configs():
     configs = []
     # Bwd is heavier — keep tiles smaller. (FB, HB, VB, num_warps, num_stages)
     candidates = [
-        (64, 64, 64, 4, 1),
-        (64, 64, 64, 4, 2),
-        (32, 64, 64, 4, 2),
-        (64, 32, 64, 4, 2),
-        (64, 64, 128, 4, 1),
-        (64, 64, 128, 4, 2),
-        (64, 64, 128, 8, 2),
-        (32, 64, 128, 4, 2),
-        (64, 32, 128, 4, 2),
-        (32, 64, 256, 8, 2),
-        (128, 64, 64, 4, 1),
-        (128, 64, 64, 8, 2),
-        (128, 64, 128, 8, 2),  # current best for vocab_size=1024,8192
+        (32, 32, 32, 8, 2),
+        (64, 64, 64, 8, 2),
+        (128, 64, 128, 8, 2),
     ]
     for fb, hb, vb, nw, ns in candidates:
         configs.append(
