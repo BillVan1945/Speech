@@ -140,7 +140,7 @@ def run_benchmark(
     if joint == "standard":
         loss_module = RNNTLoss(
             # RNNTLoss expects `num_classes` to be blank index (vocab_size - 1), not vocab size.
-            num_classes=num_classes,
+            num_classes=vocab_size - 1,
             loss_name=loss,
             loss_kwargs={'fastemit_lambda': 0.0},
             reduction='sum',

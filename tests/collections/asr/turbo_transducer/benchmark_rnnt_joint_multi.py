@@ -114,7 +114,7 @@ def main() -> None:
                 batch_size=BATCH_SIZE,
                 max_time=MAX_TIME,
                 hidden_dim=HIDDEN_DIM,
-                num_classes=vocab_size - 1,
+                vocab_size=vocab_size,
                 max_targets=MAX_TARGETS,
                 forward_only=args.forward_only,
                 dropout_p=dropout_p,
