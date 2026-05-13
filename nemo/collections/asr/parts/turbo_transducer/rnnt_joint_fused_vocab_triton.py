@@ -20,6 +20,65 @@ import triton.language as tl
 from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp, matmul
 
 
+def _fwd_autotune_configs():
+    configs = []
+    # (FB, HB, VB, num_warps, num_stages)
+    candidates = [
+        (128, 64, 64, 4, 2),
+        (128, 64, 64, 4, 3),
+        (128, 64, 128, 4, 2),
+        (128, 64, 128, 8, 2),
+        (64, 64, 128, 4, 2),
+        (64, 64, 128, 4, 3),
+        (64, 64, 256, 8, 2),
+        (128, 32, 128, 4, 3),  # current best for vocab_size=1024,8192
+        (128, 128, 64, 4, 2),
+        (64, 128, 128, 8, 2),
+    ]
+    for fb, hb, vb, nw, ns in candidates:
+        configs.append(
+            triton.Config(
+                {"FLATTENED_BATCH_BLOCK": fb, "HIDDEN_BLOCK": hb, "VOCAB_BLOCK": vb},
+                num_warps=nw,
+                num_stages=ns,
+            )
+        )
+    return configs
+
+
+def _bwd_autotune_configs():
+    configs = []
+    # Bwd is heavier — keep tiles smaller. (FB, HB, VB, num_warps, num_stages)
+    candidates = [
+        (64, 64, 64, 4, 1),
+        (64, 64, 64, 4, 2),
+        (32, 64, 64, 4, 2),
+        (64, 32, 64, 4, 2),
+        (64, 64, 128, 4, 1),
+        (64, 64, 128, 4, 2),
+        (64, 64, 128, 8, 2),
+        (32, 64, 128, 4, 2),
+        (64, 32, 128, 4, 2),
+        (32, 64, 256, 8, 2),
+        (128, 64, 64, 4, 1),
+        (128, 64, 64, 8, 2),
+        (128, 64, 128, 8, 2),  # current best for vocab_size=1024,8192
+    ]
+    for fb, hb, vb, nw, ns in candidates:
+        configs.append(
+            triton.Config(
+                {"FLATTENED_BATCH_BLOCK": fb, "HIDDEN_BLOCK": hb, "VOCAB_BLOCK": vb},
+                num_warps=nw,
+                num_stages=ns,
+            )
+        )
+    return configs
+
+
+@triton.autotune(
+    configs=_fwd_autotune_configs(),
+    key=["hidden_dim", "vocab_size", "USE_FP64", "USE_HIGH_PRECISION"],
+)
 @triton.jit
 def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     joint_hidden_ptr,
@@ -166,6 +225,11 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     )
 
 
+@triton.autotune(
+    configs=_bwd_autotune_configs(),
+    key=["hidden_dim", "vocab_size", "USE_FP64", "USE_HIGH_PRECISION"],
+    reset_to_zero=["grad_joint_hidden_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
+)
 @triton.jit
 def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     joint_hidden_ptr,
@@ -396,14 +460,9 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        VOCAB_BLOCK = 64
-        HIDDEN_BLOCK = 64
-        FLATTENED_BATCH_BLOCK = 128
-        flattened_batch_blocks = triton.cdiv(flattened_batch_size, FLATTENED_BATCH_BLOCK)
-        forward_num_stages = 1 if use_high_precision else 2
-        num_warps = 4
+        fwd_grid = lambda META: (triton.cdiv(flattened_batch_size, META["FLATTENED_BATCH_BLOCK"]),)
 
-        _rnnt_joint_fused_vocab_fwd_triton_kernel[(flattened_batch_blocks,)](
+        _rnnt_joint_fused_vocab_fwd_triton_kernel[fwd_grid](
             joint_hidden_ptr=joint_hidden,
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
@@ -419,13 +478,8 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
-            FLATTENED_BATCH_BLOCK=FLATTENED_BATCH_BLOCK,
-            HIDDEN_BLOCK=HIDDEN_BLOCK,
-            VOCAB_BLOCK=VOCAB_BLOCK,
             USE_FP64=use_fp64,
             USE_HIGH_PRECISION=use_high_precision,
-            num_warps=num_warps,
-            num_stages=forward_num_stages,
         )
 
         ctx.save_for_backward(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores)
@@ -459,20 +513,15 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             device=device,
         )
 
-        VOCAB_BLOCK = 64
-        HIDDEN_BLOCK = 64
-        FLATTENED_BATCH_BLOCK = 64 if use_high_precision else 128
         FLATTENED_BATCH_SPLITS = 64
         flattened_batch_split_size = triton.cdiv(flattened_batch_size, FLATTENED_BATCH_SPLITS)
-        vocab_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK)
 
         grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
         grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
 
-        num_warps = 4
-        num_stages = 1
+        bwd_grid = lambda META: (FLATTENED_BATCH_SPLITS, triton.cdiv(vocab_size, META["VOCAB_BLOCK"]))
 
-        _rnnt_joint_fused_vocab_bwd_triton_kernel[(FLATTENED_BATCH_SPLITS, vocab_blocks)](
+        _rnnt_joint_fused_vocab_bwd_triton_kernel[bwd_grid](
             joint_hidden_ptr=joint_hidden,
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
@@ -492,13 +541,8 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
-            FLATTENED_BATCH_BLOCK=FLATTENED_BATCH_BLOCK,
-            HIDDEN_BLOCK=HIDDEN_BLOCK,
-            VOCAB_BLOCK=VOCAB_BLOCK,
             USE_FP64=use_fp64,
             USE_HIGH_PRECISION=use_high_precision,
-            num_warps=num_warps,
-            num_stages=num_stages,
         )
 
         # convert grad to desired dtype
