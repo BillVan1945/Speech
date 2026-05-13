@@ -102,7 +102,7 @@ def run_benchmark(
     batch_size: int = 64,
     max_time: int = 150,
     hidden_dim: int = 640,
-    num_classes: int = 1024,
+    vocab_size: int = 1024,
     max_targets: int = 72,
     forward_only: bool = False,
     dropout_p: float = 0.2,
@@ -118,8 +118,7 @@ def run_benchmark(
     joint_backend = _normalize_joint_backend(joint, joint_backend)
 
     device = torch.device('cuda')
-    vocab_size = num_classes + 1
-    blank_id = num_classes
+    blank_id = vocab_size - 1
     max_target_plus_1 = max_targets + 1
 
     torch.cuda.synchronize()
@@ -437,7 +436,7 @@ def main():
     parser.add_argument('--max-time', type=int, default=150)
     parser.add_argument('--max-targets', type=int, default=72, help='Maximum target sequence length (default: 72)')
     parser.add_argument('--hidden-dim', type=int, default=640)
-    parser.add_argument('--num-classes', type=int, default=1024, help='Vocab size minus blank (blank_id=num_classes)')
+    parser.add_argument('--vocab-size', type=int, default=1024, help='Vocab size including blank (blank_id=vocab_size-1)')
     parser.add_argument('-wi', '--warmup-iterations', type=int, default=10)
     parser.add_argument('-bi', '--benchmark-iterations', type=int, default=100)
     parser.add_argument(
@@ -469,7 +468,7 @@ def main():
         batch_size=args.batch_size,
         max_time=args.max_time,
         hidden_dim=args.hidden_dim,
-        num_classes=args.num_classes,
+        vocab_size=args.vocab_size,
         max_targets=args.max_targets,
         forward_only=args.forward_only,
         dropout_p=dropout_p,
