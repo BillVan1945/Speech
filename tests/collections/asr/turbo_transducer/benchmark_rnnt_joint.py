@@ -356,14 +356,15 @@ def print_results_table(results: list[BenchmarkResults]) -> None:
         rows.append([formatter(getattr(r, field)) for _, field, formatter in TABLE_COLUMNS])
 
     column_widths = [max(len(header), *(len(row[i]) for row in rows)) for i, header in enumerate(headers)]
-    separator = "-+-".join("-" * w for w in column_widths)
-    header_line = " | ".join(h.ljust(w) for h, w in zip(headers, column_widths))
+    separator = "+-" + "-+-".join("-" * w for w in column_widths) + "-+"
+    separator_mid = "| " + " | ".join("-" * w for w in column_widths) + " |"
+    header_line = "| " + " | ".join(h.ljust(w) for h, w in zip(headers, column_widths)) + " |"
 
     print(separator)
     print(header_line)
-    print(separator)
+    print(separator_mid)
     for row in rows:
-        print(" | ".join(cell.ljust(w) for cell, w in zip(row, column_widths)))
+        print("| " + " | ".join(cell.ljust(w) for cell, w in zip(row, column_widths)) + " |")
     print(separator)
 
 
