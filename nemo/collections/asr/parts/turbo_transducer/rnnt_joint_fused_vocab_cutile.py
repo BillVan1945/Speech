@@ -104,9 +104,9 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     blank_logprobs_value = blank_logits - log_sum_exp_score
     target_logprobs_value = target_logits - log_sum_exp_score
 
-    ct.scatter(blank_logprobs_out, flattened_batch_offsets, blank_logprobs_value, mask=output_blank_mask)
-    ct.scatter(target_logprobs_out, flattened_batch_offsets, target_logprobs_value, mask=output_target_mask)
-    ct.scatter(log_sum_exp_out, flattened_batch_offsets, log_sum_exp_score, mask=output_blank_mask)
+    ct.store(blank_logprobs_out, index=flattened_batch_block_index, tile=blank_logprobs_value * output_blank_mask)
+    ct.store(target_logprobs_out, index=flattened_batch_block_index, tile=target_logprobs_value * output_target_mask)
+    ct.store(log_sum_exp_out, index=flattened_batch_block_index, tile=log_sum_exp_score * output_blank_mask)
 
 
 @ct.kernel
