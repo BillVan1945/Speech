@@ -134,8 +134,8 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     HIDDEN_BLOCK: ConstInt,
     VOCAB_BLOCK: ConstInt,
 ):
-    flattened_batch_block_index = ct.bid(0)
-    vocab_block_index = ct.bid(1)
+    vocab_block_index = ct.bid(0)
+    flattened_batch_block_index = ct.bid(1)
 
     vocab_offsets = vocab_block_index * VOCAB_BLOCK + ct.arange(VOCAB_BLOCK, dtype=ct.int32)
     vocab_mask = vocab_offsets < vocab_size
@@ -356,7 +356,7 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
 
         ct.launch(
             torch.cuda.current_stream(),
-            (batch_blocks, vocab_blocks, 1),
+            (vocab_blocks, batch_blocks, 1),
             _rnnt_joint_fused_vocab_bwd_cutile_kernel,
             (
                 joint_hidden.view(flattened_batch_size, hidden_dim),
