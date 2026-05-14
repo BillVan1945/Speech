@@ -38,7 +38,9 @@ def rnnt_joint_fused_vocab(
     weight: torch.Tensor,
     bias: torch.Tensor,
     blank_id: int,
-    use_high_precision: bool = False,
+    use_high_precision_mm: bool = False,
+    joint_hidden_grad_full_precision: bool = False,
+    weight_grad_full_precision: bool = False,
     backend: str | RnntJointFusedVocabBackend | None = RnntJointFusedVocabBackend.TRITON,
 ):
     backend = RnntJointFusedVocabBackend(backend) if backend is not None else None
@@ -63,7 +65,9 @@ def rnnt_joint_fused_vocab(
                 weight=weight,
                 bias=bias,
                 blank_id=blank_id,
-                use_high_precision=use_high_precision,
+                use_high_precision_mm=use_high_precision_mm,
+                joint_hidden_grad_full_precision=joint_hidden_grad_full_precision,
+                weight_grad_full_precision=weight_grad_full_precision,
             )
         case RnntJointFusedVocabBackend.CUTILE:
             if not CUTILE_AVAILABLE:
@@ -76,7 +80,7 @@ def rnnt_joint_fused_vocab(
                 weight=weight,
                 bias=bias,
                 blank_id=blank_id,
-                use_high_precision=use_high_precision,
+                use_high_precision_mm=use_high_precision_mm,
             )
         case _:
             raise Exception("Not implemented backend")

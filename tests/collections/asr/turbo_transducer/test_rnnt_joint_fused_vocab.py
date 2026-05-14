@@ -116,7 +116,9 @@ class TestRnntJointVocabLogProbs:
             weight=weight_kernel,
             bias=bias_kernel,
             blank_id=blank_id,
-            use_high_precision=use_high_precision,
+            use_high_precision_mm=use_high_precision,
+            joint_hidden_grad_full_precision=use_high_precision,
+            weight_grad_full_precision=use_high_precision,
             backend=backend,
         )
 
@@ -210,7 +212,9 @@ class TestRnntJointVocabLogProbs:
             weight=weight_kernel,
             bias=bias_kernel,
             blank_id=blank_id,
-            use_high_precision=use_high_precision,
+            use_high_precision_mm=use_high_precision,
+            joint_hidden_grad_full_precision=use_high_precision,
+            weight_grad_full_precision=use_high_precision,
             backend=backend,
         )
 

@@ -23,10 +23,30 @@ from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp
 def _fwd_autotune_configs():
     configs = []
     # (FB, HB, VB, num_warps, num_stages)
+    # Cover small / medium / large vocab regimes. All tile dims are powers of 2
+    # and >= 16 so tl.dot can hit tensor cores. Smaller VB favors V=1024 where
+    # the vocab dim is short; larger VB amortizes the hidden K-loop on V=8192.
     candidates = [
-        (32, 32, 32, 4, 3),
+        # Small tiles — low register pressure, good for small problem sizes
+        # (32, 32, 32, 4, 3),
+        # (32, 64, 64, 4, 3),
+        # (64, 32, 32, 4, 3),
         (64, 32, 64, 4, 3),
-        (128, 32, 128, 4, 3),
+        # Medium tiles — typical sweet spot
+        # (64, 64, 64, 4, 3),
+        # (64, 64, 128, 4, 3),
+        # (64, 128, 64, 4, 3),
+        # (128, 32, 64, 4, 3),
+        (128, 32, 128, 4, 3),  # best for 1024,8192
+        # (128, 64, 64, 4, 3),
+        # (128, 64, 128, 4, 3),
+        # # Larger VB for big vocab — amortize hidden K-loop
+        # (64, 64, 256, 4, 3),
+        # (64, 64, 256, 8, 2),
+        # (128, 64, 256, 8, 2),
+        # # Higher num_warps variants for parallelism
+        # (128, 64, 128, 8, 2),
+        # (64, 128, 128, 8, 3),
     ]
     for fb, hb, vb, nw, ns in candidates:
         configs.append(
@@ -41,11 +61,29 @@ def _fwd_autotune_configs():
 
 def _bwd_autotune_configs():
     configs = []
-    # Bwd is heavier — keep tiles smaller. (FB, HB, VB, num_warps, num_stages)
+    # Bwd has 2 K-loops, holds a [FB, VB] logits buffer, and uses atomic adds.
+    # Register/shared pressure is higher than fwd, so we explore a similar grid
+    # but lean smaller on FB*VB. (FB, HB, VB, num_warps, num_stages)
     candidates = [
-        (32, 32, 32, 8, 2),
-        (64, 64, 64, 8, 2),
-        (128, 64, 128, 8, 2),
+        # Small tiles — minimal register pressure
+        # (32, 32, 32, 4, 2),
+        # (32, 32, 32, 8, 2),
+        # (32, 64, 64, 4, 3),
+        # (64, 32, 32, 4, 2),
+        # (64, 32, 64, 4, 3),
+        (64, 32, 64, 8, 2),
+        # Medium tiles
+        # (64, 64, 64, 4, 3),
+        # (64, 64, 64, 8, 2),
+        # (64, 64, 128, 8, 2),
+        # (128, 32, 64, 8, 2),
+        # (128, 32, 128, 8, 2),
+        # (128, 64, 64, 8, 2),
+        # (128, 64, 128, 4, 2),
+        # (128, 64, 128, 8, 2),
+        # Larger VB for big vocab — fewer vocab tiles, less atomic contention
+        # (64, 64, 256, 8, 2),
+        (128, 32, 256, 8, 2),  # best for 1024,8192
     ]
     for fb, hb, vb, nw, ns in candidates:
         configs.append(
@@ -60,7 +98,7 @@ def _bwd_autotune_configs():
 
 @triton.autotune(
     configs=_fwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_FP64", "USE_HIGH_PRECISION"],
+    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
 )
 @triton.jit
 def _rnnt_joint_fused_vocab_fwd_triton_kernel(
@@ -82,14 +120,16 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     FLATTENED_BATCH_BLOCK: tl.constexpr,
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
-    USE_FP64: tl.constexpr,
-    USE_HIGH_PRECISION: tl.constexpr,
+    USE_HIGH_PRECISION_MM: tl.constexpr,
 ):
-    compute_dtype = tl.float64 if USE_FP64 else tl.float32
+    compute_dtype = tl.float32
     matmul_dtype = (
-        compute_dtype
-        if USE_HIGH_PRECISION
-        else (tl.bfloat16 if weight_ptr.dtype.element_ty == tl.bfloat16 else compute_dtype)
+        tl.bfloat16
+        if (
+            (weight_ptr.dtype.element_ty == tl.bfloat16 and joint_hidden_ptr.dtype.element_ty == tl.bfloat16)
+            and (not USE_HIGH_PRECISION_MM)
+        )
+        else compute_dtype
     )
 
     flattened_batch_block_index = tl.program_id(axis=0)
@@ -164,11 +204,11 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
         block_logits = tl.zeros([FLATTENED_BATCH_BLOCK, VOCAB_BLOCK], dtype=compute_dtype) + bias_chunk[None, :]
         for _ in tl.range(0, hidden_dim, HIDDEN_BLOCK):
             hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
-            weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype).T
+            weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
-            block_logits += matmul(
-                hidden_chunk, weight_chunk_t, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).to(compute_dtype)
+            block_logits += matmul(hidden_chunk, weight_chunk_t, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
+                compute_dtype
+            )
 
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, HIDDEN_BLOCK))
             weight_block_ptr = tl.advance(weight_block_ptr, (0, HIDDEN_BLOCK))
@@ -210,7 +250,7 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
 
 @triton.autotune(
     configs=_bwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_FP64", "USE_HIGH_PRECISION"],
+    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
     reset_to_zero=["grad_joint_hidden_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
 )
 @triton.jit
@@ -230,26 +270,29 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     max_src_len: int,
     max_tgt_len_plus_1: int,
     flattened_batch_size: int,
-    flattened_batch_split_size: int,
     hidden_dim: tl.constexpr,
     vocab_size: tl.constexpr,
     blank_id: tl.constexpr,
     FLATTENED_BATCH_BLOCK: tl.constexpr,
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
-    USE_FP64: tl.constexpr,
-    USE_HIGH_PRECISION: tl.constexpr,
+    USE_HIGH_PRECISION_MM: tl.constexpr,
 ):
-    compute_dtype = tl.float64 if USE_FP64 else tl.float32
+    compute_dtype = tl.float32
     matmul_dtype = (
-        compute_dtype
-        if USE_HIGH_PRECISION
-        else (tl.bfloat16 if weight_ptr.dtype.element_ty == tl.bfloat16 else compute_dtype)
+        tl.bfloat16
+        if (
+            (weight_ptr.dtype.element_ty == tl.bfloat16 and joint_hidden_ptr.dtype.element_ty == tl.bfloat16)
+            and (not USE_HIGH_PRECISION_MM)
+        )
+        else compute_dtype
     )
 
-    flattened_batch_split_index = tl.program_id(axis=0)
-    vocab_block_index = tl.program_id(axis=1)
+    vocab_block_index = tl.program_id(axis=0)
+    flattened_batch_split_index = tl.program_id(axis=1)
     vocab_block_start = vocab_block_index * VOCAB_BLOCK
+    FLATTENED_BATCH_SPLITS = tl.num_programs(axis=1)
+    flattened_batch_split_size = (flattened_batch_size + FLATTENED_BATCH_SPLITS - 1) // FLATTENED_BATCH_SPLITS
     split_flattened_batch_start = flattened_batch_split_index * flattened_batch_split_size
     split_flattened_batch_end = tl.minimum(
         split_flattened_batch_start + flattened_batch_split_size, flattened_batch_size
@@ -343,15 +386,15 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
             # weight_chunk: [VOCAB_BLOCK, HIDDEN_BLOCK]
             weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
-            logits_block += matmul(
-                hidden_chunk, weight_chunk_t, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).to(compute_dtype)
+            logits_block += matmul(hidden_chunk, weight_chunk_t, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
+                compute_dtype
+            )
 
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, HIDDEN_BLOCK))
             weight_block_ptr = tl.advance(weight_block_ptr, (0, HIDDEN_BLOCK))
 
         # Compute grad_logits
-        probabilities_block = tl.exp(logits_block - lse[:, None])
+        probabilities_block = tl.exp(logits_block - lse[:, None])  # [FLATTENED_BATCH_BLOCK, VOCAB_BLOCK]
         grad_logits_block = (
             -(sum_grad[:, None] * probabilities_block)
             + (grad_blank[:, None] * is_blank_vocab_col[None, :])
@@ -362,18 +405,19 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
 
         # Inner loop 2: compute grad_hidden and grad_weight in reverse iteration for cache reuse
         grad_logits_matmul = grad_logits_block.to(matmul_dtype)
-        for forward_hidden_idx in tl.range(0, hidden_dim, HIDDEN_BLOCK):
-            reverse_hidden_start = HIDDEN_RESET - HIDDEN_BLOCK - forward_hidden_idx
-            hidden_offsets = reverse_hidden_start + tl.arange(0, HIDDEN_BLOCK)
+        for r_hidden_idx in tl.range(0, hidden_dim, HIDDEN_BLOCK):
+            hidden_start = HIDDEN_RESET - HIDDEN_BLOCK - r_hidden_idx
+            hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
             hidden_mask = hidden_offsets < hidden_dim
 
             weight_block_ptr = tl.advance(weight_block_ptr, (0, -HIDDEN_BLOCK))
             weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
 
-            grad_hidden_delta = matmul(
-                grad_logits_matmul, weight_chunk, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).to(compute_dtype)
+            grad_hidden_delta = matmul(grad_logits_matmul, weight_chunk, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
+                grad_joint_hidden_out_ptr.dtype.element_ty
+            )
 
+            # need atomic: different vocab parts write to the same place
             tl.atomic_add(
                 grad_joint_hidden_out_ptr
                 + flattened_batch_flat_indices[:, None] * hidden_dim
@@ -383,13 +427,19 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
                 sem="relaxed",  # no need to guarantee order of adding - no read inside kernel
             )
 
+        for r_hidden_idx in tl.range(0, hidden_dim, HIDDEN_BLOCK):
+            hidden_start = HIDDEN_RESET - HIDDEN_BLOCK - r_hidden_idx
+            hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
+            hidden_mask = hidden_offsets < hidden_dim
+
             joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (0, -HIDDEN_BLOCK))
             joint_hidden_chunk_t = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
             grad_weight_delta = matmul(
-                joint_hidden_chunk_t, grad_logits_matmul, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).T.to(compute_dtype)
+                joint_hidden_chunk_t, grad_logits_matmul, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM
+            ).T.to(grad_joint_hidden_out_ptr.dtype.element_ty)
 
+            # need atomic: different batch parts write to the same place
             tl.atomic_add(
                 grad_weight_out_ptr + vocab_offsets[:, None] * hidden_dim + hidden_offsets[None, :],
                 grad_weight_delta,
@@ -400,7 +450,7 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
         # block pointers are at hidden 0 after reverse loop; advance batch only
         joint_hidden_block_ptr = tl.advance(joint_hidden_block_ptr, (FLATTENED_BATCH_BLOCK, 0))
 
-    # Atomic add into global grads
+    # Atomic add into global grads; different batch parts write to the same place
     tl.atomic_add(
         grad_bias_out_ptr + vocab_offsets,
         grad_bias_acc,
@@ -420,10 +470,11 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor,
         blank_id: int,
-        use_high_precision: bool = False,
+        use_high_precision_mm: bool = False,
+        joint_hidden_grad_full_precision: bool = False,
+        weight_grad_full_precision: bool = False,
     ):
-        use_fp64 = joint_hidden.dtype == torch.float64
-        float_dtype = torch.float64 if use_fp64 else torch.float32
+        float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
 
         batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim = joint_hidden.shape
         flattened_batch_size = batch_size * src_max_length * tgt_max_length_plus_1
@@ -461,23 +512,28 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
-            USE_FP64=use_fp64,
-            USE_HIGH_PRECISION=use_high_precision,
+            USE_HIGH_PRECISION_MM=use_high_precision_mm,
         )
 
         ctx.save_for_backward(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores)
         ctx.blank_id = blank_id
-        ctx.use_fp64 = use_fp64
-        ctx.use_high_precision = use_high_precision
+        ctx.use_high_precision_mm = use_high_precision_mm
+        ctx.joint_hidden_grad_full_precision = joint_hidden_grad_full_precision
+        ctx.weight_grad_full_precision = weight_grad_full_precision
         return target_logprobs, blank_logprobs
 
     @staticmethod
     def backward(ctx, grad_target_scores, grad_blank_scores):
         (joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores) = ctx.saved_tensors
         blank_id = ctx.blank_id
-        use_fp64 = ctx.use_fp64
-        use_high_precision = ctx.use_high_precision
-        float_dtype = torch.float64 if use_fp64 else torch.float32
+        use_high_precision_mm = ctx.use_high_precision_mm
+        joint_hidden_grad_full_precision = ctx.joint_hidden_grad_full_precision
+        if joint_hidden_grad_full_precision is None:
+            joint_hidden_grad_full_precision = use_high_precision_mm
+        weight_grad_full_precision = ctx.weight_grad_full_precision
+        if weight_grad_full_precision is None:
+            weight_grad_full_precision = use_high_precision_mm
+        float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
 
         grad_target_scores = grad_target_scores.contiguous()
         grad_blank_scores = grad_blank_scores.contiguous()
@@ -487,22 +543,23 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         vocab_size = weight.shape[0]
         device = joint_hidden.device
 
-        FULL_PRECISION_JOINT_GRAD_CALC = use_high_precision  # TODO: make extra param(?)
-        grad_joint_hidden_dtype = float_dtype if FULL_PRECISION_JOINT_GRAD_CALC else joint_hidden.dtype
-
         grad_joint_hidden = torch.zeros(
             [batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim],
-            dtype=grad_joint_hidden_dtype,
+            dtype=float_dtype if joint_hidden_grad_full_precision else joint_hidden.dtype,
             device=device,
         )
 
-        FLATTENED_BATCH_SPLITS = 64
-        flattened_batch_split_size = triton.cdiv(flattened_batch_size, FLATTENED_BATCH_SPLITS)
+        grad_weight = torch.zeros(
+            [vocab_size, hidden_dim], dtype=float_dtype if weight_grad_full_precision else weight.dtype, device=device
+        )
+        grad_bias = torch.zeros(
+            [vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
+        )
 
-        grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
-        grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
-
-        bwd_grid = lambda META: (FLATTENED_BATCH_SPLITS, triton.cdiv(vocab_size, META["VOCAB_BLOCK"]))
+        bwd_grid = lambda META: (
+            triton.cdiv(vocab_size, META["VOCAB_BLOCK"]),
+            triton.cdiv(flattened_batch_size, META["FLATTENED_BATCH_BLOCK"]),
+        )
 
         _rnnt_joint_fused_vocab_bwd_triton_kernel[bwd_grid](
             joint_hidden_ptr=joint_hidden,
@@ -520,12 +577,10 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             max_src_len=src_max_length,
             max_tgt_len_plus_1=tgt_max_length_plus_1,
             flattened_batch_size=flattened_batch_size,
-            flattened_batch_split_size=flattened_batch_split_size,
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
-            USE_FP64=use_fp64,
-            USE_HIGH_PRECISION=use_high_precision,
+            USE_HIGH_PRECISION_MM=use_high_precision_mm,
         )
 
         # convert grad to desired dtype
@@ -533,7 +588,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         grad_bias = grad_bias.to(bias.dtype)
         grad_joint_hidden = grad_joint_hidden.to(joint_hidden.dtype)
 
-        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None
+        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None
 
 
 def rnnt_joint_fused_vocab_triton(
@@ -544,7 +599,9 @@ def rnnt_joint_fused_vocab_triton(
     weight: torch.Tensor,
     bias: torch.Tensor,
     blank_id: int,
-    use_high_precision: bool = False,
+    use_high_precision_mm: bool = False,
+    joint_hidden_grad_full_precision: bool = False,
+    weight_grad_full_precision: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntJointFusedVocabTritonFunction.apply(
         joint_hidden,
@@ -554,6 +611,8 @@ def rnnt_joint_fused_vocab_triton(
         weight,
         bias,
         blank_id,
-        use_high_precision,
+        use_high_precision_mm,
+        joint_hidden_grad_full_precision,
+        weight_grad_full_precision,
     )
     return target_logprobs, blank_logprobs

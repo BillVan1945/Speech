@@ -257,9 +257,9 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         weight: torch.Tensor,
         bias: torch.Tensor,
         blank_id: int,
-        use_high_precision: bool = False,
+        use_high_precision_mm: bool = False,
     ):
-        del use_high_precision  # accepted for API parity; not yet used by cuTile path
+        del use_high_precision_mm  # accepted for API parity; not yet used by cuTile path
 
         batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim = joint_hidden.shape
         flattened_batch_size = batch_size * src_max_length * tgt_max_length_plus_1
@@ -400,7 +400,7 @@ def rnnt_joint_fused_vocab_cutile(
     weight: torch.Tensor,
     bias: torch.Tensor,
     blank_id: int,
-    use_high_precision: bool = False,
+    use_high_precision_mm: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntJointFusedVocabCuTileFunction.apply(
         joint_hidden,
@@ -410,6 +410,6 @@ def rnnt_joint_fused_vocab_cutile(
         weight,
         bias,
         blank_id,
-        use_high_precision,
+        use_high_precision_mm,
     )
     return target_logprobs, blank_logprobs
