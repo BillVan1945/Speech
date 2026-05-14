@@ -207,31 +207,26 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
 
     # Cast grad_logits to weight dtype for the backward matmuls (matches Triton's matmul_dtype when not high precision).
     grad_logits_for_mm = ct.astype(grad_logits_block, weight.dtype)
-    grad_logits_for_mm_t = ct.transpose(grad_logits_for_mm)
 
-    for hidden_block_index in range(num_hidden_blocks):
-        weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
-        hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
-
-        grad_hidden_delta = ct.mma(
-            grad_logits_for_mm,
-            weight_tile,
-            ct.zeros((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
-        )
-        grad_weight_delta = ct.mma(
-            grad_logits_for_mm_t,
-            hidden_tile,
-            ct.zeros((VOCAB_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
-        )
-
+    for r_hidden_block_index in range(num_hidden_blocks):
+        hidden_block_index = num_hidden_blocks - r_hidden_block_index - 1
         hidden_offsets = hidden_block_index * HIDDEN_BLOCK + ct.arange(HIDDEN_BLOCK, dtype=ct.int32)
+        weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
 
+        grad_hidden_delta = ct.matmul(grad_logits_for_mm, weight_tile)
         ct.atomic_add(
             grad_joint_hidden_2d,
             (flattened_batch_offsets[:, None], hidden_offsets[None, :]),
             grad_hidden_delta,
             memory_order=ct.MemoryOrder.RELAXED,
         )
+
+    grad_logits_for_mm_t = ct.transpose(grad_logits_for_mm)
+    for r_hidden_block_index in range(num_hidden_blocks):
+        hidden_block_index = num_hidden_blocks - r_hidden_block_index - 1
+        hidden_offsets = hidden_block_index * HIDDEN_BLOCK + ct.arange(HIDDEN_BLOCK, dtype=ct.int32)
+        hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
+        grad_weight_delta = ct.matmul(grad_logits_for_mm_t, hidden_tile)
         ct.atomic_add(
             grad_weight,
             (vocab_offsets[:, None], hidden_offsets[None, :]),
