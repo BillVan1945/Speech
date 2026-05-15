@@ -166,7 +166,7 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     )
 
     # Create block pointers once before the loops
-    NUM_HIDDEN_ITERS: tl.constexpr = (hidden_dim + HIDDEN_BLOCK - 1) // HIDDEN_BLOCK
+    NUM_HIDDEN_ITERS: tl.constexpr = tl.cdiv(hidden_dim, HIDDEN_BLOCK)
     HIDDEN_RESET: tl.constexpr = NUM_HIDDEN_ITERS * HIDDEN_BLOCK
 
     joint_hidden_block_ptr = tl.make_block_ptr(
@@ -276,7 +276,8 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     FLATTENED_BATCH_BLOCK: tl.constexpr,
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
-    USE_HIGH_PRECISION_MM: tl.constexpr,
+    GROUP_SIZE: tl.constexpr = 64,
+    USE_HIGH_PRECISION_MM: tl.constexpr = False,
 ):
     compute_dtype = tl.float32
     matmul_dtype = (
@@ -288,9 +289,12 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
         else compute_dtype
     )
 
-    vocab_block_index = tl.program_id(axis=0)
+    # flattened_batch_index = tl.program_id(axis=0)
+    # vocab_block_index = tl.program_id(axis=1)
+    flattened_batch_index, vocab_block_index = tl.swizzle2d(
+        tl.program_id(axis=0), tl.program_id(axis=1), tl.num_programs(axis=0), tl.num_programs(axis=1), GROUP_SIZE
+    )
     vocab_block_start = vocab_block_index * VOCAB_BLOCK
-    flattened_batch_index = tl.program_id(axis=1)
     flattened_batch_start = flattened_batch_index * FLATTENED_BATCH_BLOCK
 
     vocab_offsets = vocab_block_start + tl.arange(0, VOCAB_BLOCK)
@@ -300,7 +304,7 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     is_blank_vocab_col = (vocab_offsets == blank_id) & vocab_mask
 
     # Create block pointers once before the loops
-    NUM_HIDDEN_ITERS: tl.constexpr = (hidden_dim + HIDDEN_BLOCK - 1) // HIDDEN_BLOCK
+    NUM_HIDDEN_ITERS: tl.constexpr = tl.cdiv(hidden_dim, HIDDEN_BLOCK)
     HIDDEN_RESET: tl.constexpr = NUM_HIDDEN_ITERS * HIDDEN_BLOCK
 
     joint_hidden_block_ptr = tl.make_block_ptr(
@@ -544,8 +548,8 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         )
 
         bwd_grid = lambda META: (
-            triton.cdiv(vocab_size, META["VOCAB_BLOCK"]),
             triton.cdiv(flattened_batch_size, META["FLATTENED_BATCH_BLOCK"]),
+            triton.cdiv(vocab_size, META["VOCAB_BLOCK"]),
         )
 
         _rnnt_joint_fused_vocab_bwd_triton_kernel[bwd_grid](
