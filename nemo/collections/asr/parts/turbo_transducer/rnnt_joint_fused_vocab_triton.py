@@ -198,12 +198,14 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     for vocab_start in tl.range(0, vocab_size, VOCAB_BLOCK):
         vocab_offsets = vocab_start + vocab_offsets_in_block
         vocab_mask = vocab_offsets < vocab_size
+        contains_blank = vocab_start <= blank_id and blank_id < vocab_start + VOCAB_BLOCK
 
         bias_chunk = tl.load(bias_block_ptr, boundary_check=(0,)).to(compute_dtype)
 
         block_logits = tl.zeros([FLATTENED_BATCH_BLOCK, VOCAB_BLOCK], dtype=compute_dtype) + bias_chunk[None, :]
         for _ in tl.range(0, hidden_dim, HIDDEN_BLOCK):
-            hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            # hidden chunk: do not cache
+            hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1), cache_modifier=".cv").to(matmul_dtype)
             weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
             block_logits += matmul(hidden_chunk, weight_chunk_t, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
@@ -227,15 +229,15 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
         log_sum_exp_score = log_add_exp(log_sum_exp_score, block_lse)
 
         # Extract blank and target logits from this chunk
-        blank_logits += tl.sum(tl.where((vocab_offsets == blank_id)[None, :], block_logits, 0.0), axis=-1)
         target_logits += tl.sum(tl.where(vocab_offsets[None, :] == targets[:, None], block_logits, 0.0), axis=-1)
+        if contains_blank:
+            blank_logits += tl.sum(tl.where((vocab_offsets == blank_id)[None, :], block_logits, 0.0), axis=-1)
 
     tl.store(
         blank_logprobs_out_ptr + flattened_batch_offsets,
         blank_logits - log_sum_exp_score,
         mask=output_blank_mask,
     )
-
     tl.store(
         target_logprobs_out_ptr + flattened_batch_offsets,
         target_logits - log_sum_exp_score,
@@ -299,8 +301,6 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
 
     vocab_offsets = vocab_block_start + tl.arange(0, VOCAB_BLOCK)
     vocab_mask = vocab_offsets < vocab_size
-
-    grad_bias_acc = tl.zeros((VOCAB_BLOCK,), dtype=compute_dtype)
     is_blank_vocab_col = (vocab_offsets == blank_id) & vocab_mask
 
     # Create block pointers once before the loops
@@ -397,7 +397,7 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
         + (grad_target[:, None] * (vocab_offsets[None, :] == targets[:, None]))
     )
     grad_logits_block = tl.where(output_blank_mask[:, None] & vocab_mask[None, :], grad_logits_block, 0.0)
-    grad_bias_acc += tl.sum(grad_logits_block, axis=0)
+    grad_bias_acc = tl.sum(grad_logits_block, axis=0)
 
     # Inner loop 2: compute grad_hidden and grad_weight in reverse iteration for cache reuse
     grad_logits_matmul = grad_logits_block.to(matmul_dtype)
