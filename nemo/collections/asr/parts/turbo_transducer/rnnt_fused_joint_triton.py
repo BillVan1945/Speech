@@ -685,8 +685,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
         grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
 
-        bwd_num_warps = 8
-        bwd_num_stages = 2
+        bwd_num_warps = 4
+        bwd_num_stages = 1
 
         _rnnt_fused_joint_bwd_triton_kernel[(batch_size, ENCODER_X_PREDICTOR_SPLITS, vocab_blocks)](
             encoder_output_ptr=encoder_output_projected,
