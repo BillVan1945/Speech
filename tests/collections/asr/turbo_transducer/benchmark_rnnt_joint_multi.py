@@ -49,11 +49,11 @@ VOCAB_SIZES: list[int] = [
 # Each entry is (joint, joint_backend, loss). Ordering preserved within each
 # vocab group in the printed/CSV output.
 EXPERIMENTS: list[tuple[str, str, str]] = [
-    ("standard", "-", "warprnnt_numba"),
+    # ("standard", "-", "warprnnt_numba"),
     ("standard", "-", "rnnt_triton"),
     ("fused_vocab", "triton", "rnnt_triton"),
     # ("fused_vocab", "cutile", "rnnt_triton"),  # slow backward
-    ("fused", "triton", "rnnt_triton"),
+    ("fused", "triton", "rnnt_triton"),  # not yet implemented
     # ("fused", "cutile", "rnnt_triton"),  # not yet implemented
 ]
 
