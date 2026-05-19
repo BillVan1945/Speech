@@ -345,7 +345,6 @@ def _rnnt_fused_joint_bwd_triton_kernel(
     max_tgt_len_plus_1: int,
     dropout_seed: int,
     dropout_p: float,
-    dropout_inv_keep_prob: float,
     hidden_dim: tl.constexpr,
     vocab_size: tl.constexpr,
     blank_id: tl.constexpr,
@@ -371,6 +370,8 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         else compute_dtype
     )
     indices_dtype = tl.int32  # TODO: make conditional, use int64 if needed
+    dropout_inv_keep_prob = 1.0 / (1 - dropout_p) if USE_DROPOUT else 1.0
+    dropout_inv_keep_prob = dropout_inv_keep_prob.to(matmul_dtype)
 
     total_encoder_blocks = tl.cdiv(max_src_len, ENCODER_BLOCK)
     total_predictor_blocks = tl.cdiv(max_tgt_len_plus_1, PREDICTOR_BLOCK)
@@ -480,18 +481,14 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
 
         hidden_chunk = enc_chunk[:, None, :] + pred_chunk[None, :, :]
-        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk, 0)
+        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk * dropout_inv_keep_prob, 0)
         if USE_DROPOUT:
             hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
             )
             dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
-            hidden_chunk = tl.where(
-                dropout_keep_mask,
-                hidden_chunk * dropout_inv_keep_prob.to(matmul_dtype),
-                0,
-            )
+            hidden_chunk = tl.where(dropout_keep_mask, hidden_chunk, 0)
         hidden_chunk = hidden_chunk.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])
         # weight_chunk: [VOCAB_BLOCK, HIDDEN_BLOCK]
         weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
@@ -531,7 +528,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
 
         hidden_chunk = enc_chunk[:, None, :] + pred_chunk[None, :, :]
-        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk, 0)
+        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk * dropout_inv_keep_prob, 0)
         if USE_DROPOUT:
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
@@ -543,13 +540,11 @@ def _rnnt_fused_joint_bwd_triton_kernel(
 
         dropout_relu_mask = dropout_relu_mask.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])
 
-        grad_hidden_delta = matmul(grad_logits_matmul, weight_chunk, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
-            compute_dtype
+        grad_hidden_delta = (
+            matmul(grad_logits_matmul, weight_chunk, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(compute_dtype)
+            * dropout_inv_keep_prob
         )
-        if USE_DROPOUT:
-            grad_hidden_delta = tl.where(dropout_relu_mask, grad_hidden_delta * dropout_inv_keep_prob, 0.0)
-        else:
-            grad_hidden_delta = tl.where(dropout_relu_mask, grad_hidden_delta, 0.0)
+        grad_hidden_delta = tl.where(dropout_relu_mask, grad_hidden_delta, 0.0)
         grad_hidden_delta = grad_hidden_delta.reshape([ENCODER_BLOCK, PREDICTOR_BLOCK, HIDDEN_BLOCK])
 
         grad_encoder_delta = tl.sum(grad_hidden_delta, axis=1)
@@ -577,18 +572,14 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
 
         hidden_chunk = enc_chunk[:, None, :] + pred_chunk[None, :, :]
-        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk, 0)
+        hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk * dropout_inv_keep_prob, 0)
         if USE_DROPOUT:
             hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
             )
             dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
-            hidden_chunk = tl.where(
-                dropout_keep_mask,
-                hidden_chunk * dropout_inv_keep_prob.to(matmul_dtype),
-                0,
-            )
+            hidden_chunk = tl.where(dropout_keep_mask, hidden_chunk, 0)
 
         hidden_chunk = hidden_chunk.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])
 
@@ -789,7 +780,6 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             max_tgt_len_plus_1=tgt_max_length_plus_1,
             dropout_seed=dropout_seed,
             dropout_p=dropout_p,
-            dropout_inv_keep_prob=dropout_inv_keep_prob,
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
