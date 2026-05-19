@@ -28,10 +28,10 @@ def _fwd_autotune_configs():
     # The 8x8x128 case is the original tile. Larger encoder/predictor tiles reduce
     # program count; larger vocab tiles reduce repeated ReLU/dropout work per output.
     candidates = [
-        (8, 8, 32, 128, 4, 3, 8),
-        (8, 8, 32, 256, 8, 2, 8),
-        (4, 8, 32, 512, 8, 2, 8),
-        (8, 4, 32, 512, 8, 2, 8),
+        (8, 8, 32, 128, 4, 3, 4),
+        (8, 8, 32, 256, 8, 2, 4),
+        (4, 8, 32, 512, 8, 2, 4),
+        (8, 4, 32, 512, 8, 2, 4),
     ]
     for candidate in candidates:
         (
@@ -200,14 +200,14 @@ def _rnnt_fused_joint_fwd_triton_kernel(
         vocab_mask = vocab_offsets < vocab_size
         contains_blank = vocab_start <= blank_id and blank_id < vocab_start + VOCAB_BLOCK
 
-        bias_chunk = tl.load(bias_block_ptr, boundary_check=(0,)).to(compute_dtype)
+        bias_chunk = tl.load(bias_block_ptr, boundary_check=(0,), eviction_policy="evict_last").to(compute_dtype)
 
         block_logits = tl.zeros([NUM_TILE_ELEMENTS, VOCAB_BLOCK], dtype=compute_dtype) + bias_chunk[None, :]
 
         # Inner loop over hidden dimension chunks
         for hidden_start in tl.range(0, hidden_dim, HIDDEN_BLOCK):
-            enc_chunk = tl.load(enc_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
-            pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
+            enc_chunk = tl.load(enc_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
 
             # hidden = relu(enc + pred) -> [ENC, PRED, HIDDEN_BLOCK] -> [TILE, HIDDEN_BLOCK]
             hidden_chunk = (
@@ -233,7 +233,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
                     0,
                 )
 
-            weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
 
             block_logits += matmul(hidden_chunk, weight_chunk.T, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
                 compute_dtype
