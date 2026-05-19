@@ -47,8 +47,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
     USE_DROPOUT: tl.constexpr,
-    USE_FP64: tl.constexpr,
-    USE_HIGH_PRECISION: tl.constexpr,
+    USE_HIGH_PRECISION_MM: tl.constexpr,
 ):
     """
     Forward kernel for fused RNN-T Joint + log-softmax.
@@ -59,8 +58,8 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     2. Online log-softmax across vocab chunks
     3. Extract target/blank log-probs
 
-    Calculations are performed in float32 or float64 based on USE_FP64.
-    When USE_HIGH_PRECISION is False, tl.dot uses TF32 (faster but ~10-bit mantissa).
+    Calculations are performed in float32.
+    When USE_HIGH_PRECISION_MM is False, tl.dot uses TF32 (faster but ~10-bit mantissa).
     """
     batch_i = tl.program_id(axis=0)
     source_block_i = tl.program_id(axis=1)
@@ -74,11 +73,18 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     if source_i_start >= source_len or target_i_start > target_len:
         return
 
-    compute_dtype = tl.float64 if USE_FP64 else tl.float32
+    compute_dtype = tl.float32
     matmul_dtype = (
-        compute_dtype
-        if USE_HIGH_PRECISION
-        else (tl.bfloat16 if weight_ptr.dtype.element_ty == tl.bfloat16 else compute_dtype)
+        tl.bfloat16
+        if (
+            (
+                weight_ptr.dtype.element_ty == tl.bfloat16
+                and encoder_output_ptr.dtype.element_ty == tl.bfloat16
+                and predictor_output_ptr.dtype.element_ty == tl.bfloat16
+            )
+            and (not USE_HIGH_PRECISION_MM)
+        )
+        else compute_dtype
     )
 
     source_offsets = source_i_start + tl.arange(0, ENCODER_BLOCK)
@@ -167,7 +173,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
                 hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
                 hidden_mask = hidden_offsets < hidden_dim
                 dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
-                    tl.int64
+                    tl.int32
                 )
                 dropout_keep_mask = (
                     tl.rand(dropout_seed, dropout_offsets.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])) >= dropout_p
@@ -180,9 +186,9 @@ def _rnnt_fused_joint_fwd_triton_kernel(
 
             weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
 
-            block_logits += matmul(
-                hidden_chunk, weight_chunk.T, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-            ).to(compute_dtype)
+            block_logits += matmul(hidden_chunk, weight_chunk.T, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
+                compute_dtype
+            )
 
             enc_block_ptr = tl.advance(enc_block_ptr, (0, HIDDEN_BLOCK))
             pred_block_ptr = tl.advance(pred_block_ptr, (0, HIDDEN_BLOCK))
@@ -262,14 +268,20 @@ def _rnnt_fused_joint_bwd_triton_kernel(
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
     USE_DROPOUT: tl.constexpr,
-    USE_FP64: tl.constexpr,
-    USE_HIGH_PRECISION: tl.constexpr,
+    USE_HIGH_PRECISION_MM: tl.constexpr,
 ):
-    compute_dtype = tl.float64 if USE_FP64 else tl.float32
+    compute_dtype = tl.float32
     matmul_dtype = (
-        compute_dtype
-        if USE_HIGH_PRECISION
-        else (tl.bfloat16 if weight_ptr.dtype.element_ty == tl.bfloat16 else compute_dtype)
+        tl.bfloat16
+        if (
+            (
+                weight_ptr.dtype.element_ty == tl.bfloat16
+                and encoder_output_ptr.dtype.element_ty == tl.bfloat16
+                and predictor_output_ptr.dtype.element_ty == tl.bfloat16
+            )
+            and (not USE_HIGH_PRECISION_MM)
+        )
+        else compute_dtype
     )
 
     batch_i = tl.program_id(axis=0)
@@ -406,9 +418,9 @@ def _rnnt_fused_joint_bwd_triton_kernel(
                 # weight_chunk: [VOCAB_BLOCK, HIDDEN_BLOCK]
                 weight_chunk = tl.load(weight_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
 
-                logits_block += matmul(
-                    hidden_chunk, weight_chunk.T, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
-                ).to(compute_dtype)
+                logits_block += matmul(hidden_chunk, weight_chunk.T, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
+                    compute_dtype
+                )
 
                 enc_block_ptr = tl.advance(enc_block_ptr, (0, HIDDEN_BLOCK))
                 pred_block_ptr = tl.advance(pred_block_ptr, (0, HIDDEN_BLOCK))
@@ -462,7 +474,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
                     hidden_chunk = relu_chunk
 
                 grad_weight_delta = matmul(
-                    grad_logits_matmul.T, hidden_chunk, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
+                    grad_logits_matmul.T, hidden_chunk, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM
                 ).to(compute_dtype)
                 tl.atomic_add(
                     grad_weight_out_ptr + vocab_offsets[:, None] * hidden_dim + hidden_offsets[None, :],
@@ -472,7 +484,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
                 )
 
                 grad_hidden_delta = matmul(
-                    grad_logits_matmul, weight_chunk, USE_FP64=USE_FP64, USE_HIGH_PRECISION=USE_HIGH_PRECISION
+                    grad_logits_matmul, weight_chunk, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM
                 ).to(compute_dtype)
                 if USE_DROPOUT:
                     grad_hidden_delta = tl.where(dropout_relu_mask, grad_hidden_delta * dropout_inv_keep_prob, 0.0)
@@ -524,7 +536,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         activation: str = "relu",
         dropout_p: float = 0.0,
         dropout_seed: int | None = None,
-        use_high_precision: bool = False,
+        use_high_precision_mm: bool = False,
     ):
         if activation != "relu":
             raise NotImplementedError("Only relu activation is supported")
@@ -542,8 +554,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         else:
             dropout_seed = 0
 
-        use_fp64 = encoder_output_projected.dtype == torch.float64
-        float_dtype = torch.float64 if use_fp64 else torch.float32
+        float_dtype = torch.float32
 
         encoder_output_projected = encoder_output_projected.contiguous()
         predictor_output_projected = predictor_output_projected.contiguous()
@@ -562,11 +573,11 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        VOCAB_BLOCK = 128
+        VOCAB_BLOCK = 64
         HIDDEN_BLOCK = 32
         ENCODER_BLOCK = 8
         PREDICTOR_BLOCK = 8
-        forward_num_stages = 1 if use_high_precision else 3
+        forward_num_stages = 1 if use_high_precision_mm else 3
         num_warps = 4
 
         num_encoder_blocks = triton.cdiv(src_max_length, ENCODER_BLOCK)
@@ -596,8 +607,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             HIDDEN_BLOCK=HIDDEN_BLOCK,
             VOCAB_BLOCK=VOCAB_BLOCK,
             USE_DROPOUT=use_dropout,
-            USE_FP64=use_fp64,
-            USE_HIGH_PRECISION=use_high_precision,
+            USE_HIGH_PRECISION_MM=use_high_precision_mm,
             num_warps=num_warps,
             num_stages=forward_num_stages,
         )
@@ -613,8 +623,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             log_sum_exp_scores,
         )
         ctx.blank_id = blank_id
-        ctx.use_fp64 = use_fp64
-        ctx.use_high_precision = use_high_precision
+        ctx.use_high_precision_mm = use_high_precision_mm
         ctx.use_dropout = use_dropout
         ctx.dropout_seed = dropout_seed
         ctx.dropout_p = dropout_p
@@ -634,13 +643,12 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             log_sum_exp_scores,
         ) = ctx.saved_tensors
         blank_id = ctx.blank_id
-        use_fp64 = ctx.use_fp64
-        use_high_precision = ctx.use_high_precision
+        use_high_precision_mm = ctx.use_high_precision_mm
         use_dropout = ctx.use_dropout
         dropout_seed = ctx.dropout_seed
         dropout_p = ctx.dropout_p
         dropout_inv_keep_prob = ctx.dropout_inv_keep_prob
-        float_dtype = torch.float64 if use_fp64 else torch.float32
+        float_dtype = torch.float32
 
         grad_target_scores = grad_target_scores.contiguous()
         grad_blank_scores = grad_blank_scores.contiguous()
@@ -654,7 +662,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             raise NotImplementedError
 
         HIDDEN_BLOCK = 64
-        VOCAB_BLOCK = 128
+        VOCAB_BLOCK = 64
         ENCODER_BLOCK = 16
         PREDICTOR_BLOCK = 8
         ENCODER_SPLITS = 1
@@ -710,8 +718,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             HIDDEN_BLOCK=HIDDEN_BLOCK,
             VOCAB_BLOCK=VOCAB_BLOCK,
             USE_DROPOUT=use_dropout,
-            USE_FP64=use_fp64,
-            USE_HIGH_PRECISION=use_high_precision,
+            USE_HIGH_PRECISION_MM=use_high_precision_mm,
             num_warps=bwd_num_warps,
             num_stages=bwd_num_stages,
         )
@@ -737,7 +744,7 @@ def rnnt_fused_joint_triton(
     activation: str = "relu",
     dropout_p: float = 0.0,
     dropout_seed: int | None = None,
-    use_high_precision: bool = False,
+    use_high_precision_mm: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntFusedJointTritonFunction.apply(
         encoder_output_projected,
@@ -751,6 +758,6 @@ def rnnt_fused_joint_triton(
         activation,
         dropout_p,
         dropout_seed,
-        use_high_precision,
+        use_high_precision_mm,
     )
     return target_logprobs, blank_logprobs
