@@ -173,7 +173,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
                 hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
                 hidden_mask = hidden_offsets < hidden_dim
                 dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
-                    tl.int32
+                    tl.int64
                 )
                 dropout_keep_mask = (
                     tl.rand(dropout_seed, dropout_offsets.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])) >= dropout_p
@@ -573,7 +573,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        VOCAB_BLOCK = 64
+        VOCAB_BLOCK = 64 if use_high_precision_mm else 128
         HIDDEN_BLOCK = 32
         ENCODER_BLOCK = 8
         PREDICTOR_BLOCK = 8
@@ -662,7 +662,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             raise NotImplementedError
 
         HIDDEN_BLOCK = 64
-        VOCAB_BLOCK = 64
+        VOCAB_BLOCK = 64 if use_high_precision_mm else 128
         ENCODER_BLOCK = 16
         PREDICTOR_BLOCK = 8
         ENCODER_SPLITS = 1
