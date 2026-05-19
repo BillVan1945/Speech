@@ -86,6 +86,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
         )
         else compute_dtype
     )
+    indices_dtype = tl.int32  # TODO: make conditional, use int64 if needed
 
     source_offsets = source_i_start + tl.arange(0, ENCODER_BLOCK)
     target_offsets = target_i_start + tl.arange(0, PREDICTOR_BLOCK)
@@ -93,9 +94,9 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     target_valid_mask = target_offsets <= target_len  # blank is valid at u == target_len
     target_label_mask = target_offsets < target_len  # target labels exist at u < target_len
     NUM_TILE_ELEMENTS: tl.constexpr = ENCODER_BLOCK * PREDICTOR_BLOCK
-    tile_base_offsets = (batch_i * max_src_len + source_offsets).to(tl.int64)[
+    tile_base_offsets = (batch_i * max_src_len + source_offsets).to(indices_dtype)[
         :, None
-    ] * max_tgt_len_plus_1 + target_offsets[None, :].to(tl.int64)
+    ] * max_tgt_len_plus_1 + target_offsets[None, :].to(indices_dtype)
 
     vocab_chunk_offsets = tl.arange(0, VOCAB_BLOCK)
 
@@ -173,7 +174,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
                 hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
                 hidden_mask = hidden_offsets < hidden_dim
                 dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
-                    tl.int64
+                    indices_dtype
                 )
                 dropout_keep_mask = (
                     tl.rand(dropout_seed, dropout_offsets.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])) >= dropout_p
@@ -283,6 +284,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         )
         else compute_dtype
     )
+    indices_dtype = tl.int32  # TODO: make conditional, use int64 if needed
 
     batch_i = tl.program_id(axis=0)
     enc_pred_split_flat = tl.program_id(axis=1)
@@ -347,9 +349,9 @@ def _rnnt_fused_joint_bwd_triton_kernel(
 
             source_offsets = enc_tile_start + tl.arange(0, ENCODER_BLOCK)
             target_offsets = pred_tile_start + tl.arange(0, PREDICTOR_BLOCK)
-            tile_base_offsets = (batch_i * max_src_len + source_offsets).to(tl.int64)[
+            tile_base_offsets = (batch_i * max_src_len + source_offsets).to(indices_dtype)[
                 :, None
-            ] * max_tgt_len_plus_1 + target_offsets[None, :].to(tl.int64)
+            ] * max_tgt_len_plus_1 + target_offsets[None, :].to(indices_dtype)
             source_mask = (source_offsets < source_len) & (source_offsets < enc_range_end)
             target_valid_mask = (target_offsets <= target_len) & (target_offsets < pred_range_end)
             target_label_mask = (target_offsets < target_len) & (target_offsets < pred_range_end)
@@ -385,8 +387,8 @@ def _rnnt_fused_joint_bwd_triton_kernel(
             )
             sum_grad = grad_blank + grad_target
 
-            source_flat_indices = (batch_i * max_src_len + source_offsets).to(tl.int64)
-            target_flat_indices = (batch_i * max_tgt_len_plus_1 + target_offsets).to(tl.int64)
+            source_flat_indices = (batch_i * max_src_len + source_offsets).to(indices_dtype)
+            target_flat_indices = (batch_i * max_tgt_len_plus_1 + target_offsets).to(indices_dtype)
 
             bias_tile = tl.load(bias_ptr + vocab_offsets, mask=vocab_mask, other=-float("inf")).to(compute_dtype)
             logits_block = tl.zeros([NUM_TILE_ELEMENTS, VOCAB_BLOCK], dtype=compute_dtype) + bias_tile[None, :]
@@ -405,7 +407,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
                     hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
                     hidden_mask = hidden_offsets < hidden_dim
                     dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
-                        tl.int64
+                        indices_dtype
                     )
                     dropout_keep_mask = (
                         tl.rand(dropout_seed, dropout_offsets.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])) >= dropout_p
@@ -458,7 +460,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
                 )
                 if USE_DROPOUT:
                     dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
-                        tl.int64
+                        indices_dtype
                     )
                     dropout_keep_mask = (
                         tl.rand(dropout_seed, dropout_offsets.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])) >= dropout_p
