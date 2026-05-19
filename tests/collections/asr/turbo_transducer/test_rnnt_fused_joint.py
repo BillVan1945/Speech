@@ -24,7 +24,7 @@ from tests.collections.asr.decoding.utils import avoid_sync_operations
 if TRITON_AVAILABLE:
     import triton
 
-    from nemo.collections.asr.parts.turbo_transducer.utils_triton import dropout_scale_mask_kernel
+    from nemo.collections.asr.parts.turbo_transducer.utils_triton import dropout_scale_mask_kernel, mix_dropout_seed
 
 
 def _triton_dropout_scale_mask(shape, dropout_p, dropout_seed, device, dtype):
@@ -34,13 +34,14 @@ def _triton_dropout_scale_mask(shape, dropout_p, dropout_seed, device, dtype):
     for dim in shape:
         total_elements *= dim
     dropout_inv_keep_prob = 1.0 / (1.0 - dropout_p)
+    dropout_threshold = int(dropout_p * torch.iinfo(torch.int32).max)
     mask_flat = torch.empty([total_elements], device=device, dtype=torch.float32)
     BLOCK = 1024
     dropout_scale_mask_kernel[(triton.cdiv(total_elements, BLOCK),)](
         mask_out_ptr=mask_flat,
         total_elements=total_elements,
-        dropout_seed=dropout_seed,
-        dropout_p=dropout_p,
+        mixed_dropout_seed=mix_dropout_seed(dropout_seed),
+        dropout_threshold=dropout_threshold,
         dropout_inv_keep_prob=dropout_inv_keep_prob,
         BLOCK=BLOCK,
     )

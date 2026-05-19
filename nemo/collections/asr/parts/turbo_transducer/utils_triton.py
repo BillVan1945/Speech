@@ -16,6 +16,18 @@ import triton
 import triton.language as tl
 
 
+DROPOUT_HASH_MAX = tl.constexpr(0x7FFFFFFF)
+DROPOUT_SEED_MIX_MULTIPLIER = 2654435761
+
+
+def mix_dropout_seed(dropout_seed: int) -> int:
+    """Pre-mix a dropout seed into a well-spread signed int32."""
+    mixed_seed = (int(dropout_seed) * DROPOUT_SEED_MIX_MULTIPLIER) & 0xFFFFFFFF
+    if mixed_seed >= 0x80000000:
+        mixed_seed -= 0x100000000
+    return mixed_seed
+
+
 @triton.jit
 def log_add_exp(log_probs_1, log_probs_2):
     max_score = tl.maximum(log_probs_1, log_probs_2)
@@ -31,6 +43,21 @@ def matmul(a: tl.tensor, b: tl.tensor, USE_FP64: tl.constexpr = False, USE_HIGH_
     else:
         result = tl.dot(a, b)
     return result
+
+
+@triton.jit
+def dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshold):
+    """
+    Deterministic dropout mask based on a lightweight per-offset integer hash.
+
+    The offset hash follows the cuTile dropout implementation in TileGym.
+    The seed is pre-mixed on the Python side before launch.
+    """
+    combined = dropout_offsets.to(tl.int32) * 1103515245 + mixed_dropout_seed
+    hash_value = combined ^ (combined >> 16)
+    hash_value = hash_value ^ (hash_value << 8)
+    hash_value = hash_value ^ (hash_value >> 4)
+    return (hash_value & DROPOUT_HASH_MAX) >= dropout_threshold
 
 
 @triton.jit
@@ -66,13 +93,13 @@ def sum_at_block(x: tl.tensor, y: tl.tensor, block_id, axis: tl.constexpr):
 def dropout_scale_mask_kernel(
     mask_out_ptr,
     total_elements: int,
-    dropout_seed: int,
-    dropout_p: float,
+    mixed_dropout_seed: int,
+    dropout_threshold: int,
     dropout_inv_keep_prob: float,
     BLOCK: tl.constexpr,
 ):
     flat_offsets = tl.program_id(axis=0) * BLOCK + tl.arange(0, BLOCK)
     valid_mask = flat_offsets < total_elements
-    keep_mask = tl.rand(dropout_seed, flat_offsets.to(tl.int64)) >= dropout_p
+    keep_mask = dropout_hash_keep_mask(mixed_dropout_seed, flat_offsets, dropout_threshold)
     dropout_scale_mask = tl.where(keep_mask, dropout_inv_keep_prob, 0.0)
     tl.store(mask_out_ptr + flat_offsets, dropout_scale_mask, mask=valid_mask)

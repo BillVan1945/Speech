@@ -19,7 +19,12 @@ import triton
 import triton.language as tl
 
 
-from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp, matmul
+from nemo.collections.asr.parts.turbo_transducer.utils_triton import (
+    dropout_hash_keep_mask,
+    log_add_exp,
+    matmul,
+    mix_dropout_seed,
+)
 
 
 def _fwd_autotune_configs():
@@ -101,6 +106,7 @@ def _bwd_autotune_configs():
 @triton.autotune(
     configs=_fwd_autotune_configs(),
     key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM"],
+    cache_results=True,
 )
 @triton.jit
 def _rnnt_fused_joint_fwd_triton_kernel(
@@ -116,8 +122,8 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     log_sum_exp_out_ptr,
     max_src_len: int,
     max_tgt_len_plus_1: int,
-    dropout_seed: int,
-    dropout_p: float,
+    mixed_dropout_seed: int,
+    dropout_threshold: int,
     dropout_inv_keep_prob: float,
     hidden_dim: tl.constexpr,
     vocab_size: tl.constexpr,
@@ -256,7 +262,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
                 dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                     indices_dtype
                 )
-                dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
+                dropout_keep_mask = dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshold)
                 hidden_chunk = tl.where(
                     dropout_keep_mask,
                     hidden_chunk * dropout_inv_keep_prob.to(matmul_dtype),
@@ -324,6 +330,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     configs=_bwd_autotune_configs(),
     key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM"],
     reset_to_zero=["grad_encoder_out_ptr", "grad_predictor_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
+    cache_results=True,
 )
 @triton.jit
 def _rnnt_fused_joint_bwd_triton_kernel(
@@ -343,7 +350,8 @@ def _rnnt_fused_joint_bwd_triton_kernel(
     grad_bias_out_ptr,
     max_src_len: int,
     max_tgt_len_plus_1: int,
-    dropout_seed: int,
+    mixed_dropout_seed: int,
+    dropout_threshold: int,
     dropout_p: float,
     hidden_dim: tl.constexpr,
     vocab_size: tl.constexpr,
@@ -487,7 +495,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
             )
-            dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
+            dropout_keep_mask = dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshold)
             hidden_chunk = tl.where(dropout_keep_mask, hidden_chunk, 0)
         hidden_chunk = hidden_chunk.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])
         # weight_chunk: [VOCAB_BLOCK, HIDDEN_BLOCK]
@@ -533,7 +541,7 @@ def _rnnt_fused_joint_bwd_triton_kernel(
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
             )
-            dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
+            dropout_keep_mask = dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshold)
             dropout_relu_mask = dropout_keep_mask & hidden_mask[None, :] & (hidden_chunk > 0.0)
         else:
             dropout_relu_mask = hidden_mask[None, :] & (hidden_chunk > 0.0)
@@ -574,11 +582,10 @@ def _rnnt_fused_joint_bwd_triton_kernel(
         hidden_chunk = enc_chunk[:, None, :] + pred_chunk[None, :, :]
         hidden_chunk = tl.where(hidden_chunk > 0, hidden_chunk * dropout_inv_keep_prob, 0)
         if USE_DROPOUT:
-            hidden_offsets = hidden_start + tl.arange(0, HIDDEN_BLOCK)
             dropout_offsets = tile_base_offsets[:, :, None] * hidden_dim + hidden_offsets[None, None, :].to(
                 indices_dtype
             )
-            dropout_keep_mask = tl.rand(dropout_seed, dropout_offsets) >= dropout_p
+            dropout_keep_mask = dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshold)
             hidden_chunk = tl.where(dropout_keep_mask, hidden_chunk, 0)
 
         hidden_chunk = hidden_chunk.reshape([NUM_TILE_ELEMENTS, HIDDEN_BLOCK])
@@ -634,13 +641,16 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         use_dropout = dropout_p > 0.0
         dropout_keep_prob = 1.0 - dropout_p
         dropout_inv_keep_prob = 1.0 / dropout_keep_prob if use_dropout else 1.0
+        dropout_threshold = int(dropout_p * torch.iinfo(torch.int32).max) if use_dropout else 0
         if use_dropout:
             if dropout_seed is None:
                 dropout_seed = random.randint(0, 2**31 - 1)
             elif not (0 <= dropout_seed < 2**31):
                 raise ValueError("dropout_seed must be in range [0, 2**31)")
+            mixed_dropout_seed = mix_dropout_seed(dropout_seed)
         else:
             dropout_seed = 0
+            mixed_dropout_seed = 0
 
         float_dtype = torch.float32
 
@@ -680,8 +690,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             log_sum_exp_out_ptr=log_sum_exp_scores,
             max_src_len=src_max_length,
             max_tgt_len_plus_1=tgt_max_length_plus_1,
-            dropout_seed=dropout_seed,
-            dropout_p=dropout_p,
+            mixed_dropout_seed=mixed_dropout_seed,
+            dropout_threshold=dropout_threshold,
             dropout_inv_keep_prob=dropout_inv_keep_prob,
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
@@ -703,7 +713,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         ctx.blank_id = blank_id
         ctx.use_high_precision_mm = use_high_precision_mm
         ctx.use_dropout = use_dropout
-        ctx.dropout_seed = dropout_seed
+        ctx.mixed_dropout_seed = mixed_dropout_seed
+        ctx.dropout_threshold = dropout_threshold
         ctx.dropout_p = dropout_p
         ctx.dropout_inv_keep_prob = dropout_inv_keep_prob
         return target_logprobs, blank_logprobs
@@ -723,9 +734,9 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         blank_id = ctx.blank_id
         use_high_precision_mm = ctx.use_high_precision_mm
         use_dropout = ctx.use_dropout
-        dropout_seed = ctx.dropout_seed
+        mixed_dropout_seed = ctx.mixed_dropout_seed
+        dropout_threshold = ctx.dropout_threshold
         dropout_p = ctx.dropout_p
-        dropout_inv_keep_prob = ctx.dropout_inv_keep_prob
         float_dtype = torch.float32
 
         grad_target_scores = grad_target_scores.contiguous()
@@ -778,7 +789,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             grad_bias_out_ptr=grad_bias,
             max_src_len=src_max_length,
             max_tgt_len_plus_1=tgt_max_length_plus_1,
-            dropout_seed=dropout_seed,
+            mixed_dropout_seed=mixed_dropout_seed,
+            dropout_threshold=dropout_threshold,
             dropout_p=dropout_p,
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
