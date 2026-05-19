@@ -99,6 +99,7 @@ def _bwd_autotune_configs():
 @triton.autotune(
     configs=_fwd_autotune_configs(),
     key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
+    cache_results=True,
 )
 @triton.jit
 def _rnnt_joint_fused_vocab_fwd_triton_kernel(
@@ -254,6 +255,7 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     configs=_bwd_autotune_configs(),
     key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
     reset_to_zero=["grad_joint_hidden_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
+    cache_results=True,
 )
 @triton.jit
 def _rnnt_joint_fused_vocab_bwd_triton_kernel(
