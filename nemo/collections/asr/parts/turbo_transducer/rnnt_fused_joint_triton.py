@@ -22,6 +22,47 @@ import triton.language as tl
 from nemo.collections.asr.parts.turbo_transducer.utils_triton import log_add_exp, matmul
 
 
+def _fwd_autotune_configs():
+    configs = []
+    # (encoder block, predictor block, hidden block, vocab block, num warps, num stages, swizzle group, use .cg)
+    # The 8x8x128 case is the original tile. Larger encoder/predictor tiles reduce
+    # program count; larger vocab tiles reduce repeated ReLU/dropout work per output.
+    candidates = [
+        (8, 8, 32, 128, 4, 3, 8),
+        (8, 8, 32, 256, 8, 2, 8),
+        (4, 8, 32, 512, 8, 2, 8),
+        (8, 4, 32, 512, 8, 2, 8),
+    ]
+    for candidate in candidates:
+        (
+            encoder_block,
+            predictor_block,
+            hidden_block,
+            vocab_block,
+            num_warps,
+            num_stages,
+            group_size,
+        ) = candidate
+        configs.append(
+            triton.Config(
+                {
+                    "ENCODER_BLOCK": encoder_block,
+                    "PREDICTOR_BLOCK": predictor_block,
+                    "HIDDEN_BLOCK": hidden_block,
+                    "VOCAB_BLOCK": vocab_block,
+                    "GROUP_SIZE": group_size,
+                },
+                num_warps=num_warps,
+                num_stages=num_stages,
+            )
+        )
+    return configs
+
+
+@triton.autotune(
+    configs=_fwd_autotune_configs(),
+    key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM"],
+)
 @triton.jit
 def _rnnt_fused_joint_fwd_triton_kernel(
     encoder_output_ptr,
@@ -48,6 +89,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     VOCAB_BLOCK: tl.constexpr,
     USE_DROPOUT: tl.constexpr,
     USE_HIGH_PRECISION_MM: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
 ):
     """
     Forward kernel for fused RNN-T Joint + log-softmax.
@@ -62,9 +104,13 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     When USE_HIGH_PRECISION_MM is False, tl.dot uses TF32 (faster but ~10-bit mantissa).
     """
     batch_i = tl.program_id(axis=0)
-    source_block_i = tl.program_id(axis=1)
-    target_block_i = tl.program_id(axis=2)
-    # TODO: swizzle?
+    source_block_i, target_block_i = tl.swizzle2d(
+        tl.program_id(axis=1),
+        tl.program_id(axis=2),
+        tl.num_programs(axis=1),
+        tl.num_programs(axis=2),
+        GROUP_SIZE,
+    )
     source_i_start = source_block_i * ENCODER_BLOCK
     target_i_start = target_block_i * PREDICTOR_BLOCK
 
@@ -112,7 +158,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     targets = targets_predictor[None, :].broadcast_to([ENCODER_BLOCK, PREDICTOR_BLOCK]).reshape([NUM_TILE_ELEMENTS])
 
     # Create block pointers for encoder, predictor, weight, and bias
-    NUM_HIDDEN_ITERS: tl.constexpr = (hidden_dim + HIDDEN_BLOCK - 1) // HIDDEN_BLOCK
+    NUM_HIDDEN_ITERS: tl.constexpr = tl.cdiv(hidden_dim, HIDDEN_BLOCK)
     HIDDEN_RESET: tl.constexpr = NUM_HIDDEN_ITERS * HIDDEN_BLOCK
 
     enc_block_ptr = tl.make_block_ptr(
@@ -152,6 +198,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     for vocab_start in tl.range(0, vocab_size, VOCAB_BLOCK):
         vocab_offsets = vocab_start + vocab_chunk_offsets
         vocab_mask = vocab_offsets < vocab_size
+        contains_blank = vocab_start <= blank_id and blank_id < vocab_start + VOCAB_BLOCK
 
         bias_chunk = tl.load(bias_block_ptr, boundary_check=(0,)).to(compute_dtype)
 
@@ -159,8 +206,8 @@ def _rnnt_fused_joint_fwd_triton_kernel(
 
         # Inner loop over hidden dimension chunks
         for hidden_start in tl.range(0, hidden_dim, HIDDEN_BLOCK):
-            enc_chunk = tl.load(enc_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
-            pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1)).to(matmul_dtype)
+            enc_chunk = tl.load(enc_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
+            pred_chunk = tl.load(pred_block_ptr, boundary_check=(0, 1), eviction_policy="evict_last").to(matmul_dtype)
 
             # hidden = relu(enc + pred) -> [ENC, PRED, HIDDEN_BLOCK] -> [TILE, HIDDEN_BLOCK]
             hidden_chunk = (
@@ -211,8 +258,9 @@ def _rnnt_fused_joint_fwd_triton_kernel(
         log_sum_exp_score = log_add_exp(log_sum_exp_score, block_lse)
 
         # Extract blank and target logits from this chunk
-        blank_logits += tl.sum(tl.where((vocab_offsets == blank_id)[None, :], block_logits, 0.0), axis=-1)
         target_logits += tl.sum(tl.where(vocab_offsets[None, :] == targets[:, None], block_logits, 0.0), axis=-1)
+        if contains_blank:
+            blank_logits += tl.sum(tl.where((vocab_offsets == blank_id)[None, :], block_logits, 0.0), axis=-1)
 
     # Output index in [B, T, U+1] grid
     indices_grid = (batch_i * max_src_len + source_offsets[:, None]) * max_tgt_len_plus_1 + target_offsets[None, :]
@@ -576,17 +624,13 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        VOCAB_BLOCK = 64 if use_high_precision_mm else 128
-        HIDDEN_BLOCK = 32
-        ENCODER_BLOCK = 8
-        PREDICTOR_BLOCK = 8
-        forward_num_stages = 1 if use_high_precision_mm else 3
-        num_warps = 4
+        fwd_grid = lambda META: (
+            batch_size,
+            triton.cdiv(src_max_length, META["ENCODER_BLOCK"]),
+            triton.cdiv(tgt_max_length_plus_1, META["PREDICTOR_BLOCK"]),
+        )
 
-        num_encoder_blocks = triton.cdiv(src_max_length, ENCODER_BLOCK)
-        num_predictor_blocks = triton.cdiv(tgt_max_length_plus_1, PREDICTOR_BLOCK)
-
-        _rnnt_fused_joint_fwd_triton_kernel[(batch_size, num_encoder_blocks, num_predictor_blocks)](
+        _rnnt_fused_joint_fwd_triton_kernel[fwd_grid](
             encoder_output_ptr=encoder_output_projected,
             predictor_output_ptr=predictor_output_projected,
             targets_ptr=targets,
@@ -605,14 +649,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             hidden_dim=hidden_dim,
             vocab_size=vocab_size,
             blank_id=blank_id,
-            ENCODER_BLOCK=ENCODER_BLOCK,
-            PREDICTOR_BLOCK=PREDICTOR_BLOCK,
-            HIDDEN_BLOCK=HIDDEN_BLOCK,
-            VOCAB_BLOCK=VOCAB_BLOCK,
             USE_DROPOUT=use_dropout,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
-            num_warps=num_warps,
-            num_stages=forward_num_stages,
         )
 
         ctx.save_for_backward(
