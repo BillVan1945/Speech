@@ -64,6 +64,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     batch_i = tl.program_id(axis=0)
     source_block_i = tl.program_id(axis=1)
     target_block_i = tl.program_id(axis=2)
+    # TODO: swizzle?
     source_i_start = source_block_i * ENCODER_BLOCK
     target_i_start = target_block_i * PREDICTOR_BLOCK
 
