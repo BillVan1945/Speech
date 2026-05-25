@@ -51,6 +51,7 @@ def dropout_hash_keep_mask(mixed_dropout_seed, dropout_offsets, dropout_threshol
     Deterministic dropout mask based on a lightweight per-offset integer hash.
 
     The offset hash follows the cuTile dropout implementation in TileGym.
+    https://github.com/NVIDIA/TileGym/blob/main/src/tilegym/ops/cutile/dropout.py
     The seed is pre-mixed on the Python side before launch.
     """
     combined = dropout_offsets.to(tl.int32) * 1103515245 + mixed_dropout_seed
