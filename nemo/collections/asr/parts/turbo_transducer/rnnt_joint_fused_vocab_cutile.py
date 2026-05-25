@@ -361,7 +361,7 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
 
         ct.launch(
             torch.cuda.current_stream(),
-            (vocab_blocks, batch_blocks, 1),
+            (batch_blocks, vocab_blocks, 1),
             _rnnt_joint_fused_vocab_bwd_cutile_kernel,
             (
                 joint_hidden.view(flattened_batch_size, hidden_dim),
@@ -386,7 +386,7 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
                 _BACKWARD_FLATTENED_BATCH_BLOCK,
                 _BACKWARD_HIDDEN_BLOCK,
                 _BACKWARD_VOCAB_BLOCK,
-                8,
+                64,
             ),
         )
 
