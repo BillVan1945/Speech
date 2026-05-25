@@ -14,6 +14,7 @@
 
 import cuda.tile as ct
 import torch
+from nemo.collections.asr.parts.turbo_transducer.utils_cutile import swizzle_2d_as_triton
 
 ConstInt = ct.Constant[int]
 
@@ -133,9 +134,13 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     FLATTENED_BATCH_BLOCK: ConstInt,
     HIDDEN_BLOCK: ConstInt,
     VOCAB_BLOCK: ConstInt,
+    GROUP_SIZE: ConstInt,
 ):
-    vocab_block_index = ct.bid(0)
-    flattened_batch_block_index = ct.bid(1)
+    # vocab_block_index = ct.bid(0)
+    # flattened_batch_block_index = ct.bid(1)
+    flattened_batch_block_index, vocab_block_index = swizzle_2d_as_triton(
+        ct.bid(0), ct.bid(1), ct.num_blocks(0), ct.num_blocks(1), GROUP_SIZE
+    )
 
     vocab_offsets = vocab_block_index * VOCAB_BLOCK + ct.arange(VOCAB_BLOCK, dtype=ct.int32)
     vocab_mask = vocab_offsets < vocab_size
@@ -381,6 +386,7 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
                 _BACKWARD_FLATTENED_BATCH_BLOCK,
                 _BACKWARD_HIDDEN_BLOCK,
                 _BACKWARD_VOCAB_BLOCK,
+                8,
             ),
         )
 
