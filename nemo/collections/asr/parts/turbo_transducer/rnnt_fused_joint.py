@@ -39,7 +39,9 @@ def rnnt_fused_joint(
     activation: str = "relu",
     dropout_p: float = 0.0,
     dropout_seed: int | None = None,
-    use_high_precision: bool = False,
+    use_high_precision_mm: bool = False,
+    encoder_predictor_grad_full_precision: bool = True,
+    weight_grad_full_precision: bool = True,
     backend: str | RnntFusedJointBackend | None = RnntFusedJointBackend.TRITON,
 ):
     backend = RnntFusedJointBackend(backend) if backend is not None else None
@@ -57,18 +59,20 @@ def rnnt_fused_joint(
             if not TRITON_AVAILABLE:
                 raise ModuleNotFoundError("Triton is unavailable")
             target_logprobs, blank_logprobs = rnnt_fused_joint_triton(
-                encoder_output_projected,
-                predictor_output_projected,
-                targets,
-                tgt_lengths,
-                src_lengths,
-                weight,
-                bias,
-                blank_id,
-                activation,
-                dropout_p,
-                dropout_seed,
-                use_high_precision,
+                encoder_output_projected=encoder_output_projected,
+                predictor_output_projected=predictor_output_projected,
+                targets=targets,
+                tgt_lengths=tgt_lengths,
+                src_lengths=src_lengths,
+                weight=weight,
+                bias=bias,
+                blank_id=blank_id,
+                activation=activation,
+                dropout_p=dropout_p,
+                dropout_seed=dropout_seed,
+                use_high_precision_mm=use_high_precision_mm,
+                encoder_predictor_grad_full_precision=encoder_predictor_grad_full_precision,
+                weight_grad_full_precision=weight_grad_full_precision,
             )
         case RnntFusedJointBackend.CUTILE:
             if not CUTILE_AVAILABLE:

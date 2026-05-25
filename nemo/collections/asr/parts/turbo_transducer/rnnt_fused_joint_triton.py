@@ -632,6 +632,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         dropout_p: float = 0.0,
         dropout_seed: int | None = None,
         use_high_precision_mm: bool = False,
+        encoder_predictor_grad_full_precision: bool = True,
+        weight_grad_full_precision: bool = True,
     ):
         if activation != "relu":
             raise NotImplementedError("Only relu activation is supported")
@@ -717,6 +719,8 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         ctx.dropout_threshold = dropout_threshold
         ctx.dropout_p = dropout_p
         ctx.dropout_inv_keep_prob = dropout_inv_keep_prob
+        ctx.encoder_predictor_grad_full_precision = encoder_predictor_grad_full_precision
+        ctx.weight_grad_full_precision = weight_grad_full_precision
         return target_logprobs, blank_logprobs
 
     @staticmethod
@@ -737,6 +741,9 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         mixed_dropout_seed = ctx.mixed_dropout_seed
         dropout_threshold = ctx.dropout_threshold
         dropout_p = ctx.dropout_p
+        encoder_predictor_grad_full_precision = ctx.encoder_predictor_grad_full_precision
+        weight_grad_full_precision = ctx.weight_grad_full_precision
+
         float_dtype = torch.float32
 
         grad_target_scores = grad_target_scores.contiguous()
@@ -752,18 +759,22 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
 
         grad_encoder = torch.zeros(
             [batch_size, src_max_length, hidden_dim],
-            dtype=float_dtype,
+            dtype=float_dtype if encoder_predictor_grad_full_precision else encoder_output_projected.dtype,
             device=device,
         )
         grad_predictor = torch.zeros(
             [batch_size, tgt_max_length_plus_1, hidden_dim],
-            dtype=float_dtype,
+            dtype=float_dtype if encoder_predictor_grad_full_precision else predictor_output_projected.dtype,
             device=device,
         )
 
         # grad output variables
-        grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
-        grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
+        grad_weight = torch.zeros(
+            [vocab_size, hidden_dim], dtype=float_dtype if weight_grad_full_precision else weight.dtype, device=device
+        )
+        grad_bias = torch.zeros(
+            [vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
+        )
 
         bwd_grid = lambda META: (
             batch_size
@@ -805,7 +816,22 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         grad_weight = grad_weight.to(weight.dtype)
         grad_bias = grad_bias.to(bias.dtype)
 
-        return grad_encoder, grad_predictor, None, None, None, grad_weight, grad_bias, None, None, None, None, None
+        return (
+            grad_encoder,
+            grad_predictor,
+            None,
+            None,
+            None,
+            grad_weight,
+            grad_bias,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def rnnt_fused_joint_triton(
@@ -821,6 +847,8 @@ def rnnt_fused_joint_triton(
     dropout_p: float = 0.0,
     dropout_seed: int | None = None,
     use_high_precision_mm: bool = False,
+    encoder_predictor_grad_full_precision: bool = True,
+    weight_grad_full_precision: bool = True,
 ):
     target_logprobs, blank_logprobs = _RnntFusedJointTritonFunction.apply(
         encoder_output_projected,
@@ -835,5 +863,7 @@ def rnnt_fused_joint_triton(
         dropout_p,
         dropout_seed,
         use_high_precision_mm,
+        encoder_predictor_grad_full_precision,
+        weight_grad_full_precision,
     )
     return target_logprobs, blank_logprobs
