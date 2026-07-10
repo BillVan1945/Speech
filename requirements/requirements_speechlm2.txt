@@ -1,3 +1,0 @@
-# nemo_automodel
-# NB: nemo_automodel causes conflicts (transformers, torch)
-flashoptim
