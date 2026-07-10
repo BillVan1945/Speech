@@ -187,6 +187,13 @@ model:
     _target_: nemo.collections.asr.modules.RNNTJoint
     log_softmax: null  # 'null' would set it automatically according to CPU/GPU device
     preserve_memory: false  # dramatically slows down training, but might preserve some memory
+    turbo_kernel:
+      type: null  # null, fused_vocab, fused
+      kwargs:
+        use_high_precision_mm: false
+        input_grad_full_precision: true  # false?
+        weight_grad_full_precision: true  # false?
+        backend: triton
 
     # Fuses the computation of prediction net + joint net + loss + WER calculation
     # to be run on sub-batches of size `fused_batch_size`.
@@ -196,8 +203,9 @@ model:
     # An optimal ratio of fused_batch_size : *_ds.batch_size is 1:1.
     # However, to preserve memory, this ratio can be 1:8 or even 1:16.
     # Extreme case of 1:B (i.e. fused_batch_size=1) should be avoided as training speed would be very slow.
-    fuse_loss_wer: true
-    fused_batch_size: 4
+    # NB: fuse_loss_wer/fused_batch_size are incompatible with fused_kernel
+    fuse_loss_wer: false
+    fused_batch_size: -1
 
     jointnet:
       joint_hidden: ${model.model_defaults.joint_hidden}
@@ -220,13 +228,17 @@ model:
       alsd_max_target_len: 2.0  # for Alignment-Length Synchronous Decoding
 
   loss:
-    loss_name: "default"
+    loss_name: "turbo_rnnt"
 
     warprnnt_numba_kwargs:
       # FastEmit regularization: https://arxiv.org/abs/2010.11148
       # You may enable FastEmit to reduce the latency of the model for streaming
       fastemit_lambda: 0.0  # Recommended values to be in range [1e-4, 1e-2], 0.001 is a good start.
       clamp: -1.0  # if > 0, applies gradient clamping in range [-clamp, clamp] for the joint tensor only.
+
+    turbo_rnnt_kwargs:
+      backend: triton
+      fastemit_lambda: 0.0  # Recommended values to be in range [1e-4, 1e-2], 0.001 is a good start.
 
   optim:
     name: adamw
