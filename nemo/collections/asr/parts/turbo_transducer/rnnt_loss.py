@@ -15,6 +15,7 @@
 import torch
 import torch.nn as nn
 
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE, triton_required
 from nemo.utils import logging
 
@@ -29,6 +30,7 @@ class TurboRnntLoss(nn.Module):
         fastemit_lambda: float = 0.0,
         mask_non_finite: bool = False,
         warn_non_finite: bool = False,
+        backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
     ):
         """
         Init method
@@ -45,6 +47,9 @@ class TurboRnntLoss(nn.Module):
         self.reduction = None
         self.mask_non_finite = mask_non_finite
         self.warn_non_finite = warn_non_finite
+        self.backend = TurboTransducerBackend(backend) if backend is not None else TurboTransducerBackend.TRITON
+        if self.backend is not TurboTransducerBackend.TRITON:
+            raise NotImplementedError("Only Triton backend is now supported")
         if not TRITON_AVAILABLE:
             logging.warning("Triton is disabled, it will result error if using the loss")
 

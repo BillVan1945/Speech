@@ -159,7 +159,7 @@ RNNT_LOSS_RESOLVER = {
         lib_name="torch",
         min_version='0.0',
         is_available=True,  # always allow instantiation of the loss
-        installation_msg="Turbo Transducer (Triton) RNN-T loss",
+        installation_msg="Turbo Transducer RNN-T loss",
         force_float32=False,  # do not cast logits to float32
     ),
 }
