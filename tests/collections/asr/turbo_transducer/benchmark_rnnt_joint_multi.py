@@ -50,11 +50,11 @@ VOCAB_SIZES: list[int] = [
 # vocab group in the printed/CSV output.
 EXPERIMENTS: list[tuple[str, str, str]] = [
     # ("standard", "-", "warprnnt_numba"),
-    ("standard", "-", "rnnt_triton"),
-    ("fused_vocab", "triton", "rnnt_triton"),
-    # ("fused_vocab", "cutile", "rnnt_triton"),  # slow backward
-    ("fused", "triton", "rnnt_triton"),
-    # ("fused", "cutile", "rnnt_triton"),  # not yet implemented
+    ("standard", "-", "turbo_rnnt"),
+    ("fused_vocab", "triton", "turbo_rnnt"),
+    # ("fused_vocab", "cutile", "turbo_rnnt"),  # slow backward
+    ("fused", "triton", "turbo_rnnt"),
+    # ("fused", "cutile", "turbo_rnnt"),  # not yet implemented
 ]
 
 # Tensor shape / training-knob defaults from `_dev/flow/projects/turbo_transducer/main.md`.

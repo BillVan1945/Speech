@@ -16,9 +16,9 @@
 Benchmark script comparing standard joint + loss vs fused Triton joint + loss.
 
 Usage:
-    python benchmark_rnnt_joint.py --joint standard --loss rnnt_triton --dtype bfloat16
-    python benchmark_rnnt_joint.py --joint fused --loss rnnt_triton --dtype bfloat16
-    python benchmark_rnnt_joint.py --joint fused_vocab --loss rnnt_triton --dtype bfloat16
+    python benchmark_rnnt_joint.py --joint standard --loss turbo_rnnt --dtype bfloat16
+    python benchmark_rnnt_joint.py --joint fused --loss turbo_rnnt --dtype bfloat16
+    python benchmark_rnnt_joint.py --joint fused_vocab --loss turbo_rnnt --dtype bfloat16
     python benchmark_rnnt_joint.py --joint standard --loss warprnnt_numba --dtype bfloat16
     python benchmark_rnnt_joint.py --joint fused --dtype bfloat16 -fo  # forward only
 
@@ -44,7 +44,7 @@ STANDARD_BACKEND_LABEL = "-"
 
 VALID_JOINTS = ("standard", "fused_vocab", "fused")
 VALID_JOINT_BACKENDS = ("triton", "cutile")
-VALID_LOSSES = ("warprnnt_numba", "rnnt_triton")
+VALID_LOSSES = ("warprnnt_numba", "turbo_rnnt")
 
 
 @dataclass
@@ -112,8 +112,8 @@ def run_benchmark(
         raise ValueError(f"Invalid joint={joint!r}. Expected one of {VALID_JOINTS}.")
     if loss not in VALID_LOSSES:
         raise ValueError(f"Invalid loss={loss!r}. Expected one of {VALID_LOSSES}.")
-    if joint != "standard" and loss != "rnnt_triton":
-        raise ValueError(f"Joint={joint!r} requires loss='rnnt_triton', got loss={loss!r}.")
+    if joint != "standard" and loss != "turbo_rnnt":
+        raise ValueError(f"Joint={joint!r} requires loss='turbo_rnnt', got loss={loss!r}.")
 
     joint_backend = _normalize_joint_backend(joint, joint_backend)
 
@@ -422,7 +422,7 @@ def main():
     parser.add_argument(
         '--loss',
         type=str,
-        default='rnnt_triton',
+        default='turbo_rnnt',
         choices=list(VALID_LOSSES),
         help='Loss implementation',
     )
