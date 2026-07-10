@@ -36,7 +36,7 @@ import torch
 from omegaconf import DictConfig, OmegaConf
 
 from nemo.collections.asr.losses.rnnt_pytorch import MultiblankRNNTLossPytorch, RNNTLossPytorch, TDTLossPytorch
-from nemo.collections.asr.parts.turbo_transducer.rnnt_loss import TritonRnntLoss
+from nemo.collections.asr.parts.turbo_transducer.rnnt_loss import TurboRnntLoss
 from nemo.core.classes import Loss, typecheck
 from nemo.core.neural_types import LabelsType, LengthsType, LogprobsType, LossType, NeuralType
 from nemo.core.utils import numba_utils
@@ -332,8 +332,8 @@ def resolve_rnnt_loss(loss_name: str, blank_idx: int, loss_kwargs: dict = None) 
         loss_kwargs = _clean_kwargs(loss_name, loss_kwargs, GraphWTransducerLoss.__init__, ignore_params={"blank"})
         loss_func = GraphWTransducerLoss(blank=blank_idx, **loss_kwargs)
     elif loss_name == "turbo_rnnt":
-        loss_kwargs = _clean_kwargs(loss_name, loss_kwargs, TritonRnntLoss.__init__, ignore_params={"blank"})
-        loss_func = TritonRnntLoss(blank=blank_idx, **loss_kwargs)
+        loss_kwargs = _clean_kwargs(loss_name, loss_kwargs, TurboRnntLoss.__init__, ignore_params={"blank"})
+        loss_func = TurboRnntLoss(blank=blank_idx, **loss_kwargs)
     else:
         raise ValueError(
             f"Invalid value of `loss_name`: {loss_name}. Allowed loss names are :" f"{loss_function_names}"

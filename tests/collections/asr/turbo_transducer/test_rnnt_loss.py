@@ -17,7 +17,7 @@ import pytest
 import torch
 
 from nemo.collections.asr.parts.numba.rnnt_loss.rnnt_numpy import RNNTLoss as RNNTLoss_Numpy
-from nemo.collections.asr.parts.turbo_transducer.rnnt_loss import TritonRnntLoss
+from nemo.collections.asr.parts.turbo_transducer.rnnt_loss import TurboRnntLoss
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 if not TRITON_AVAILABLE:
@@ -79,7 +79,7 @@ class TestTritonRnntLoss:
         )
         labels = [[1, 2]]
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         expected_loss = 4.495666
@@ -119,7 +119,7 @@ class TestTritonRnntLoss:
         )
         labels = [[0, 1, 0]]
 
-        triton_rnnt = TritonRnntLoss(blank=acts.shape[-1] - 1)
+        triton_rnnt = TurboRnntLoss(blank=acts.shape[-1] - 1)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         expected_loss = 6.789285182952881
@@ -266,7 +266,7 @@ class TestTritonRnntLoss:
         expected_loss = np.array(expected_loss)
         labels = [[1, 2], [1, 1]]
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         assert np.allclose(triton_loss, expected_loss), "big_test average costs mismatch."
@@ -279,7 +279,7 @@ class TestTritonRnntLoss:
         acts = rng.randn(1, 4, 3, 3)
         labels = [[1, 2]]
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy()
@@ -297,7 +297,7 @@ class TestTritonRnntLoss:
         acts = rng.randn(1, src_length, tgt_length + 1, vocab_size)
         labels = rng.randint(low=1, high=vocab_size, size=[1, tgt_length])
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy()
@@ -318,7 +318,7 @@ class TestTritonRnntLoss:
             [1, 1, 2, 1, 2, 3, 3, 1, 1, 1],
         ]
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy()
@@ -343,7 +343,7 @@ class TestTritonRnntLoss:
         lengths = torch.full([B], T, dtype=torch.long).cuda()
         label_lengths = torch.full([B], U, dtype=torch.long).cuda()
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_costs = triton_rnnt(acts_tensor, labels_tensor, lengths, label_lengths)
         triton_total = triton_costs.sum()
         triton_total.backward()
@@ -372,7 +372,7 @@ class TestTritonRnntLoss:
         acts = rng.randn(1, 1, 2, 3).astype(np.float32)
         labels = [[1]]
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy()
@@ -403,7 +403,7 @@ class TestTritonRnntLoss:
         lengths_tensor = torch.LongTensor(src_lengths).cuda()
         label_lengths_tensor = torch.LongTensor(tgt_lengths).cuda()
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_costs = triton_rnnt(acts_tensor, labels_tensor, lengths_tensor, label_lengths_tensor)
         triton_total = triton_costs.sum()
         triton_total.backward()
@@ -445,7 +445,7 @@ class TestTritonRnntLoss:
         lengths = torch.LongTensor([4, 4]).cuda()
         label_lengths = torch.LongTensor([2, 2]).cuda()
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
         triton_costs = triton_rnnt(acts_tensor, labels_tensor, lengths, label_lengths)
         triton_total = triton_costs.sum()
         triton_total.backward()
@@ -473,7 +473,7 @@ class TestTritonRnntLoss:
         lengths = torch.LongTensor([4, 4]).cuda()
         label_lengths = torch.LongTensor([2, 2]).cuda()
 
-        triton_rnnt = TritonRnntLoss(blank=0)
+        triton_rnnt = TurboRnntLoss(blank=0)
 
         with avoid_sync_operations(acts_tensor.device):
             triton_costs = triton_rnnt(acts_tensor, labels_tensor, lengths, label_lengths)
@@ -492,17 +492,17 @@ class TestTritonRnntLoss:
         label_lengths = torch.LongTensor([2, 2]).cuda()
 
         clean_acts_tensor = torch.from_numpy(acts.copy()).cuda().requires_grad_(True)
-        clean_loss = TritonRnntLoss(blank=0)(clean_acts_tensor, labels_tensor, lengths, label_lengths).detach()
+        clean_loss = TurboRnntLoss(blank=0)(clean_acts_tensor, labels_tensor, lengths, label_lengths).detach()
 
         corrupt_acts = acts.copy()
         corrupt_acts[1, 0, 0, 0] = np.nan
 
         unmasked_acts_tensor = torch.from_numpy(corrupt_acts.copy()).cuda().requires_grad_(True)
-        unmasked_loss = TritonRnntLoss(blank=0)(unmasked_acts_tensor, labels_tensor, lengths, label_lengths)
+        unmasked_loss = TurboRnntLoss(blank=0)(unmasked_acts_tensor, labels_tensor, lengths, label_lengths)
         assert not torch.isfinite(unmasked_loss).all()
 
         masked_acts_tensor = torch.from_numpy(corrupt_acts).cuda().requires_grad_(True)
-        masked_loss = TritonRnntLoss(blank=0, mask_non_finite=True)(
+        masked_loss = TurboRnntLoss(blank=0, mask_non_finite=True)(
             masked_acts_tensor, labels_tensor, lengths, label_lengths
         )
 
@@ -527,7 +527,7 @@ class TestTritonRnntLoss:
         acts = rng.randn(1, 4, 3, 3).astype(np.float32)
         labels = [[1, 2]]
 
-        triton_rnnt = TritonRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
+        triton_rnnt = TurboRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy(fastemit_lambda=fastemit_lambda)
@@ -550,7 +550,7 @@ class TestTritonRnntLoss:
         labels = [[1, 2, 3, 4], [2, 3, 1, 5], [4, 1, 2, 3], [3, 5, 1, 2]]
         fastemit_lambda = 0.01
 
-        triton_rnnt = TritonRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
+        triton_rnnt = TurboRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
         triton_loss, triton_grad = wrap_and_call(triton_rnnt, acts, labels, device)
 
         fn_np = RNNTLoss_Numpy(fastemit_lambda=fastemit_lambda)
@@ -586,7 +586,7 @@ class TestTritonRnntLoss:
         lengths_tensor = torch.LongTensor(src_lengths).cuda()
         label_lengths_tensor = torch.LongTensor(tgt_lengths).cuda()
 
-        triton_rnnt = TritonRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
+        triton_rnnt = TurboRnntLoss(blank=0, fastemit_lambda=fastemit_lambda)
         triton_costs = triton_rnnt(acts_tensor, labels_tensor, lengths_tensor, label_lengths_tensor)
         triton_total = triton_costs.sum()
         triton_total.backward()
@@ -618,10 +618,10 @@ class TestTritonRnntLoss:
         acts = rng.randn(2, 5, 4, 6).astype(np.float32)
         labels = [[1, 2, 3], [4, 1, 2]]
 
-        triton_no_fe = TritonRnntLoss(blank=0)
+        triton_no_fe = TurboRnntLoss(blank=0)
         loss_no_fe, grad_no_fe = wrap_and_call(triton_no_fe, acts, labels, device)
 
-        triton_fe_zero = TritonRnntLoss(blank=0, fastemit_lambda=0.0)
+        triton_fe_zero = TurboRnntLoss(blank=0, fastemit_lambda=0.0)
         loss_fe_zero, grad_fe_zero = wrap_and_call(triton_fe_zero, acts, labels, device)
 
         assert np.array_equal(loss_no_fe, loss_fe_zero), "fastemit_lambda=0.0 should give identical loss"

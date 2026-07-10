@@ -22,7 +22,7 @@ if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_triton
 
 
-class TritonRnntLoss(nn.Module):
+class TurboRnntLoss(nn.Module):
     def __init__(
         self,
         blank: int,
