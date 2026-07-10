@@ -97,6 +97,7 @@ CUDA_PYTHON_INSTALLATION_MESSAGE = "Try installing cuda-python with `pip install
 
 try:
     import cuda.tile as _  # noqa: F401
+
     # TODO: check CUDA 13.2+
     CUTILE_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):

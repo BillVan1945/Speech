@@ -53,7 +53,7 @@ EXPERIMENTS: list[tuple[str, str, str]] = [
     ("standard", "-", "rnnt_triton"),
     ("fused_vocab", "triton", "rnnt_triton"),
     # ("fused_vocab", "cutile", "rnnt_triton"),  # slow backward
-    ("fused", "triton", "rnnt_triton"),  # not yet implemented
+    ("fused", "triton", "rnnt_triton"),
     # ("fused", "cutile", "rnnt_triton"),  # not yet implemented
 ]
 
