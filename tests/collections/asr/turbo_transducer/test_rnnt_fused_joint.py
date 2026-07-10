@@ -140,7 +140,7 @@ class TestRnntJointTriton:
             weight=weight_tri,
             bias=bias_tri,
             blank_id=blank_id,
-            use_high_precision=use_high_precision,
+            use_high_precision_mm=use_high_precision,
         )
 
         forward_atol = 1e-5
@@ -234,7 +234,7 @@ class TestRnntJointTriton:
             weight=weight_tri,
             bias=bias_tri,
             blank_id=blank_id,
-            use_high_precision=use_high_precision,
+            use_high_precision_mm=use_high_precision,
         )
 
         forward_atol = 1e-5
@@ -357,7 +357,7 @@ class TestRnntJointTriton:
             blank_id=blank_id,
             dropout_p=dropout_p,
             dropout_seed=dropout_seed,
-            use_high_precision=use_high_precision,
+            use_high_precision_mm=use_high_precision,
         )
 
         assert torch.allclose(target_tri, target_ref, atol=1e-5)

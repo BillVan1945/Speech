@@ -206,7 +206,9 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
         block_logits = tl.zeros([FLATTENED_BATCH_BLOCK, VOCAB_BLOCK], dtype=compute_dtype) + bias_chunk[None, :]
         for _ in tl.range(0, hidden_dim, HIDDEN_BLOCK):
             # hidden chunk: do not cache
-            hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1), cache_modifier=".cv").to(matmul_dtype)
+            hidden_chunk = tl.load(joint_hidden_block_ptr, boundary_check=(0, 1), cache_modifier=".cv").to(
+                matmul_dtype
+            )
             weight_chunk_t = tl.load(weight_block_ptr, boundary_check=(0, 1)).T.to(matmul_dtype)
 
             block_logits += matmul(hidden_chunk, weight_chunk_t, USE_HIGH_PRECISION=USE_HIGH_PRECISION_MM).to(
