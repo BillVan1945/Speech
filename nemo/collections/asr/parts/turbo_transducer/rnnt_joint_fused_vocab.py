@@ -39,7 +39,7 @@ def rnnt_joint_fused_vocab(
     bias: torch.Tensor,
     blank_id: int,
     use_high_precision_mm: bool = False,
-    joint_hidden_grad_full_precision: bool = False,
+    input_grad_full_precision: bool = False,
     weight_grad_full_precision: bool = False,
     backend: str | RnntJointFusedVocabBackend | None = RnntJointFusedVocabBackend.TRITON,
 ):
@@ -66,7 +66,7 @@ def rnnt_joint_fused_vocab(
                 bias=bias,
                 blank_id=blank_id,
                 use_high_precision_mm=use_high_precision_mm,
-                joint_hidden_grad_full_precision=joint_hidden_grad_full_precision,
+                input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
             )
         case RnntJointFusedVocabBackend.CUTILE:

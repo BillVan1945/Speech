@@ -1536,16 +1536,6 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
     def turbo_kernel_type(self) -> Optional[str]:
         return self._turbo_kernel_type
 
-    def _turbo_kernel_call_kwargs(self) -> Dict[str, Any]:
-        kernel_kwargs = dict(self._turbo_kernel_kwargs)
-        if 'input_grad_full_precision' in kernel_kwargs:
-            input_grad_full_precision = kernel_kwargs.pop('input_grad_full_precision')
-            if self._turbo_kernel_type == 'fused_vocab':
-                kernel_kwargs['joint_hidden_grad_full_precision'] = input_grad_full_precision
-            else:
-                kernel_kwargs['encoder_predictor_grad_full_precision'] = input_grad_full_precision
-        return kernel_kwargs
-
     def forward_for_loss(
         self,
         encoder_outputs: torch.Tensor,
@@ -1565,7 +1555,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
         encoder_output_projected = self.project_encoder(encoder_outputs)
         predictor_output_projected = self.project_prednet(decoder_outputs)
         vocab_projection = self.joint_net[-1]
-        kernel_kwargs = self._turbo_kernel_call_kwargs()
+        kernel_kwargs = dict(self._turbo_kernel_kwargs)
 
         if self._turbo_kernel_type == 'fused_vocab':
             joint_hidden = self._joint_hidden_after_projection(encoder_output_projected, predictor_output_projected)

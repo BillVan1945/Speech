@@ -40,7 +40,7 @@ def rnnt_fused_joint(
     dropout_p: float = 0.0,
     dropout_seed: int | None = None,
     use_high_precision_mm: bool = False,
-    encoder_predictor_grad_full_precision: bool = True,
+    input_grad_full_precision: bool = True,
     weight_grad_full_precision: bool = True,
     backend: str | RnntFusedJointBackend | None = RnntFusedJointBackend.TRITON,
 ):
@@ -71,7 +71,7 @@ def rnnt_fused_joint(
                 dropout_p=dropout_p,
                 dropout_seed=dropout_seed,
                 use_high_precision_mm=use_high_precision_mm,
-                encoder_predictor_grad_full_precision=encoder_predictor_grad_full_precision,
+                input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
             )
         case RnntFusedJointBackend.CUTILE:

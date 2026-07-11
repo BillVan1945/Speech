@@ -466,7 +466,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         bias: torch.Tensor,
         blank_id: int,
         use_high_precision_mm: bool = False,
-        joint_hidden_grad_full_precision: bool = False,
+        input_grad_full_precision: bool = False,
         weight_grad_full_precision: bool = False,
     ):
         float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
@@ -513,7 +513,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         ctx.save_for_backward(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores)
         ctx.blank_id = blank_id
         ctx.use_high_precision_mm = use_high_precision_mm
-        ctx.joint_hidden_grad_full_precision = joint_hidden_grad_full_precision
+        ctx.input_grad_full_precision = input_grad_full_precision
         ctx.weight_grad_full_precision = weight_grad_full_precision
         return target_logprobs, blank_logprobs
 
@@ -522,9 +522,9 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         (joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores) = ctx.saved_tensors
         blank_id = ctx.blank_id
         use_high_precision_mm = ctx.use_high_precision_mm
-        joint_hidden_grad_full_precision = ctx.joint_hidden_grad_full_precision
-        if joint_hidden_grad_full_precision is None:
-            joint_hidden_grad_full_precision = use_high_precision_mm
+        input_grad_full_precision = ctx.input_grad_full_precision
+        if input_grad_full_precision is None:
+            input_grad_full_precision = use_high_precision_mm
         weight_grad_full_precision = ctx.weight_grad_full_precision
         if weight_grad_full_precision is None:
             weight_grad_full_precision = use_high_precision_mm
@@ -540,7 +540,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
 
         grad_joint_hidden = torch.zeros(
             [batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim],
-            dtype=float_dtype if joint_hidden_grad_full_precision else joint_hidden.dtype,
+            dtype=float_dtype if input_grad_full_precision else joint_hidden.dtype,
             device=device,
         )
 
@@ -595,7 +595,7 @@ def rnnt_joint_fused_vocab_triton(
     bias: torch.Tensor,
     blank_id: int,
     use_high_precision_mm: bool = False,
-    joint_hidden_grad_full_precision: bool = False,
+    input_grad_full_precision: bool = False,
     weight_grad_full_precision: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntJointFusedVocabTritonFunction.apply(
@@ -607,7 +607,7 @@ def rnnt_joint_fused_vocab_triton(
         bias,
         blank_id,
         use_high_precision_mm,
-        joint_hidden_grad_full_precision,
+        input_grad_full_precision,
         weight_grad_full_precision,
     )
     return target_logprobs, blank_logprobs

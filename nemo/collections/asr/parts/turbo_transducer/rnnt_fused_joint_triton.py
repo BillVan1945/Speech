@@ -632,7 +632,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         dropout_p: float = 0.0,
         dropout_seed: int | None = None,
         use_high_precision_mm: bool = False,
-        encoder_predictor_grad_full_precision: bool = True,
+        input_grad_full_precision: bool = True,
         weight_grad_full_precision: bool = True,
     ):
         if activation != "relu":
@@ -719,7 +719,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         ctx.dropout_threshold = dropout_threshold
         ctx.dropout_p = dropout_p
         ctx.dropout_inv_keep_prob = dropout_inv_keep_prob
-        ctx.encoder_predictor_grad_full_precision = encoder_predictor_grad_full_precision
+        ctx.input_grad_full_precision = input_grad_full_precision
         ctx.weight_grad_full_precision = weight_grad_full_precision
         return target_logprobs, blank_logprobs
 
@@ -741,7 +741,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         mixed_dropout_seed = ctx.mixed_dropout_seed
         dropout_threshold = ctx.dropout_threshold
         dropout_p = ctx.dropout_p
-        encoder_predictor_grad_full_precision = ctx.encoder_predictor_grad_full_precision
+        input_grad_full_precision = ctx.input_grad_full_precision
         weight_grad_full_precision = ctx.weight_grad_full_precision
 
         float_dtype = torch.float32
@@ -759,12 +759,12 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
 
         grad_encoder = torch.zeros(
             [batch_size, src_max_length, hidden_dim],
-            dtype=float_dtype if encoder_predictor_grad_full_precision else encoder_output_projected.dtype,
+            dtype=float_dtype if input_grad_full_precision else encoder_output_projected.dtype,
             device=device,
         )
         grad_predictor = torch.zeros(
             [batch_size, tgt_max_length_plus_1, hidden_dim],
-            dtype=float_dtype if encoder_predictor_grad_full_precision else predictor_output_projected.dtype,
+            dtype=float_dtype if input_grad_full_precision else predictor_output_projected.dtype,
             device=device,
         )
 
@@ -847,7 +847,7 @@ def rnnt_fused_joint_triton(
     dropout_p: float = 0.0,
     dropout_seed: int | None = None,
     use_high_precision_mm: bool = False,
-    encoder_predictor_grad_full_precision: bool = True,
+    input_grad_full_precision: bool = True,
     weight_grad_full_precision: bool = True,
 ):
     target_logprobs, blank_logprobs = _RnntFusedJointTritonFunction.apply(
@@ -863,7 +863,7 @@ def rnnt_fused_joint_triton(
         dropout_p,
         dropout_seed,
         use_high_precision_mm,
-        encoder_predictor_grad_full_precision,
+        input_grad_full_precision,
         weight_grad_full_precision,
     )
     return target_logprobs, blank_logprobs
