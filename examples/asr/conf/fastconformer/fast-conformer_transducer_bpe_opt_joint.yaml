@@ -214,7 +214,7 @@ model:
       dropout: 0.2
 
   decoding:
-    strategy: "greedy_batch" # can be greedy, greedy_batch, beam, tsd, alsd.
+    strategy: "greedy_batch" # mainly: greedy_batch, malsd_batch; experimental: greedy, maes_batch, beam, tsd, alsd, etc.
 
     # greedy strategy config
     greedy:
