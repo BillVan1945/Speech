@@ -27,6 +27,11 @@ class AbstractRNNTJoint(NeuralModule, ABC):
     embeddings in order to compute the joint of the two prior to decoding the output sequence.
     """
 
+    @property
+    def uses_turbo_kernel(self) -> bool:
+        """Whether this Joint uses an optimized training-only kernel."""
+        return False
+
     @abstractmethod
     def joint_after_projection(self, f: torch.Tensor, g: torch.Tensor) -> Any:
         """

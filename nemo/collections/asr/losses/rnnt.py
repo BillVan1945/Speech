@@ -430,6 +430,11 @@ class RNNTLoss(Loss):
         self._force_float32 = RNNT_LOSS_RESOLVER[loss_name].force_float32
         self._fp16_compat_checked = False
 
+    @property
+    def supports_logprobs_input(self) -> bool:
+        """Whether the selected loss accepts precomputed target and blank log-probabilities."""
+        return callable(getattr(self._loss, 'forward_from_logprobs', None))
+
     def reduce(self, losses, target_lengths):
 
         if isinstance(losses, List):
@@ -446,6 +451,41 @@ class RNNTLoss(Loss):
             losses = losses.sum() / target_lengths.sum()  # same as above but longer samples weigh more
 
         return losses
+
+    def forward_from_logprobs(
+        self,
+        target_logprobs: torch.Tensor,
+        blank_logprobs: torch.Tensor,
+        input_lengths: torch.Tensor,
+        target_lengths: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute RNN-T loss from target and blank log-probabilities."""
+        if not self.supports_logprobs_input:
+            raise RuntimeError(
+                f"{type(self._loss).__name__} does not support target and blank log-probabilities as input"
+            )
+
+        input_lengths = input_lengths.long()
+        target_lengths = target_lengths.long()
+        target_logprobs = target_logprobs.contiguous()
+        blank_logprobs = blank_logprobs.contiguous()
+
+        loss_reduction = self._loss.reduction
+        self._loss.reduction = None
+        try:
+            loss = self._loss.forward_from_logprobs(
+                target_logprobs=target_logprobs,
+                blank_logprobs=blank_logprobs,
+                act_lens=input_lengths,
+                label_lens=target_lengths,
+            )
+        finally:
+            self._loss.reduction = loss_reduction
+
+        if self.reduction is not None:
+            loss = self.reduce(loss, target_lengths)
+
+        return loss
 
     @typecheck()
     def forward(self, log_probs, targets, input_lengths, target_lengths):

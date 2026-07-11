@@ -181,6 +181,20 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         # Setup encoder adapters (from ASRAdapterModelMixin)
         self.setup_adapters()
 
+        self._validate_turbo_kernel_config()
+
+    def _validate_turbo_kernel_config(self):
+        if not self.joint.uses_turbo_kernel:
+            return
+        if self.joint.fuse_loss_wer:
+            raise ValueError("Joint `turbo_kernel` and `fuse_loss_wer` cannot be enabled together")
+        if not self.loss.supports_logprobs_input:
+            raise ValueError("Joint `turbo_kernel` requires an RNN-T loss that accepts target/blank log-probabilities")
+        if getattr(self, 'consistency_loss', None) is not None:
+            raise ValueError("Joint `turbo_kernel` is incompatible with consistency loss, which requires full logits")
+        if self.joint.turbo_kernel_type == 'fused' and self.joint.is_adapter_available():
+            raise ValueError("The `fused` Joint turbo kernel does not support Joint adapters")
+
     def setup_optim_normalization(self):
         """
         Helper method to setup normalization of certain parts of the model prior to the optimization step.
@@ -763,6 +777,32 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         encoded, encoded_len = self.encoder(audio_signal=processed_signal, length=processed_signal_length)
         return encoded, encoded_len
 
+    def _compute_rnnt_loss(self, encoded, decoder, transcript, encoded_len, target_length):
+        if self.joint.uses_turbo_kernel:
+            target_logprobs, blank_logprobs = self.joint.forward_for_loss(
+                encoder_outputs=encoded,
+                decoder_outputs=decoder,
+                encoder_lengths=encoded_len,
+                transcripts=transcript,
+                transcript_lengths=target_length,
+            )
+            loss_value = self.loss.forward_from_logprobs(
+                target_logprobs=target_logprobs,
+                blank_logprobs=blank_logprobs,
+                input_lengths=encoded_len,
+                target_lengths=target_length,
+            )
+            return loss_value, None
+
+        joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder)
+        loss_value = self.loss(
+            log_probs=joint,
+            targets=transcript,
+            input_lengths=encoded_len,
+            target_lengths=target_length,
+        )
+        return loss_value, joint
+
     # PTL-specific methods
     def training_step(self, batch, batch_nb):
         # Reset access registry
@@ -794,10 +834,12 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
 
         # If experimental fused Joint-Loss-WER is not used
         if not self.joint.fuse_loss_wer:
-            # Compute full joint and loss
-            joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder)
-            loss_value = self.loss(
-                log_probs=joint, targets=transcript, input_lengths=encoded_len, target_lengths=target_length
+            loss_value, joint = self._compute_rnnt_loss(
+                encoded=encoded,
+                decoder=decoder,
+                transcript=transcript,
+                encoded_len=encoded_len,
+                target_length=target_length,
             )
 
             # Add auxiliary losses, if registered
@@ -924,10 +966,12 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
         if not self.joint.fuse_loss_wer:
             if self.compute_eval_loss:
                 decoder, target_length, states = self.decoder(targets=transcript, target_length=transcript_len)
-                joint = self.joint(encoder_outputs=encoded, decoder_outputs=decoder)
-
-                loss_value = self.loss(
-                    log_probs=joint, targets=transcript, input_lengths=encoded_len, target_lengths=target_length
+                loss_value, _ = self._compute_rnnt_loss(
+                    encoded=encoded,
+                    decoder=decoder,
+                    transcript=transcript,
+                    encoded_len=encoded_len,
+                    target_length=target_length,
                 )
 
                 tensorboard_logs['val_loss'] = loss_value

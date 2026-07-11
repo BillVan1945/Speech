@@ -20,7 +20,10 @@ from nemo.core.utils.optional_libs import TRITON_AVAILABLE, triton_required
 from nemo.utils import logging
 
 if TRITON_AVAILABLE:
-    from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_triton
+    from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import (
+        rnnt_loss_from_logprobs_triton,
+        rnnt_loss_triton,
+    )
 
 
 class TurboRnntLoss(nn.Module):
@@ -52,6 +55,16 @@ class TurboRnntLoss(nn.Module):
             raise NotImplementedError("Only Triton backend is now supported")
         if not TRITON_AVAILABLE:
             logging.warning("Triton is disabled, it will result error if using the loss")
+
+    def _postprocess_loss(self, loss_batch: torch.Tensor) -> torch.Tensor:
+        if self.warn_non_finite or self.mask_non_finite:
+            loss_finite_mask = torch.isfinite(loss_batch)
+            if self.warn_non_finite and not loss_finite_mask.all():
+                logging.warning(f"Loss contains NaN/inf values: {loss_batch}")
+            if self.mask_non_finite:
+                loss_batch = torch.where(loss_finite_mask, loss_batch, torch.zeros_like(loss_batch))
+
+        return loss_batch
 
     @triton_required
     def forward(
@@ -85,11 +98,25 @@ class TurboRnntLoss(nn.Module):
             tgt_lengths=label_lens,
             fastemit_lambda=self.fastemit_lambda,
         )
-        if self.warn_non_finite or self.mask_non_finite:
-            loss_finite_mask = torch.isfinite(loss_batch)
-            if self.warn_non_finite and not loss_finite_mask.all():
-                logging.warning(f"Loss contains NaN/inf values: {loss_batch}")
-            if self.mask_non_finite:
-                loss_batch = torch.where(loss_finite_mask, loss_batch, torch.zeros_like(loss_batch))
+        return self._postprocess_loss(loss_batch)
 
-        return loss_batch
+    @triton_required
+    def forward_from_logprobs(
+        self,
+        target_logprobs: torch.Tensor,
+        blank_logprobs: torch.Tensor,
+        act_lens: torch.Tensor,
+        label_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute RNN-T loss from target and blank log-probabilities."""
+        if target_logprobs.device.type != "cuda" or blank_logprobs.device.type != "cuda":
+            raise NotImplementedError("Triton loss supports only CUDA inputs")
+
+        loss_batch = rnnt_loss_from_logprobs_triton(
+            target_logprobs=target_logprobs,
+            blank_logprobs=blank_logprobs,
+            src_lengths=act_lens,
+            tgt_lengths=label_lens,
+            fastemit_lambda=self.fastemit_lambda,
+        )
+        return self._postprocess_loss(loss_batch)
