@@ -437,7 +437,9 @@ def main():
     parser.add_argument('--max-time', type=int, default=150)
     parser.add_argument('--max-targets', type=int, default=72, help='Maximum target sequence length (default: 72)')
     parser.add_argument('--hidden-dim', type=int, default=640)
-    parser.add_argument('--vocab-size', type=int, default=1024, help='Vocab size including blank (blank_id=vocab_size-1)')
+    parser.add_argument(
+        '--vocab-size', type=int, default=1024, help='Vocab size including blank (blank_id=vocab_size-1)'
+    )
     parser.add_argument('-wi', '--warmup-iterations', type=int, default=10)
     parser.add_argument('-bi', '--benchmark-iterations', type=int, default=100)
     parser.add_argument(

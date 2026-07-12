@@ -552,6 +552,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
 
         # A float32 vocab tail predicates the whole kernel, including all full blocks. Pad inputs so every
         # VOCAB_BLOCK in _bwd_autotune_configs is aligned and dummy logits have exactly zero probability.
+        # TODO: is it possible to avoid magic 256 constant?
         padded_vocab_size = triton.cdiv(vocab_size, 256) * 256
         vocab_padding = padded_vocab_size - vocab_size
         if joint_hidden.dtype == torch.float32 and vocab_padding:

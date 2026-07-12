@@ -20,6 +20,7 @@ from tests.collections.asr.decoding.utils import make_preprocessor_deterministic
 
 CHECKPOINTS_PATH = Path("/home/TestData/asr")
 
+
 @pytest.fixture(scope="package")
 def _stt_en_conformer_transducer_small_raw():
     if CHECKPOINTS_PATH.exists():

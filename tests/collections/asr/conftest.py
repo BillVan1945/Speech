@@ -361,6 +361,7 @@ def rnn_loss_sample_data() -> Type[RnntLossSampleData]:
 
 # models
 
+
 @pytest.fixture(scope='session')
 def fast_conformer_transducer_model():
     return ASRModel.from_pretrained("stt_en_fastconformer_transducer_large")
