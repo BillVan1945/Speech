@@ -63,7 +63,6 @@ MAX_TIME: int = 150
 MAX_TARGETS: int = 72
 HIDDEN_DIM: int = 640
 DROPOUT_P: float = 0.2
-DTYPE: str = "bfloat16"
 
 
 def main() -> None:
@@ -75,6 +74,7 @@ def main() -> None:
         "-fo", "--forward-only", action="store_true", help="Benchmark forward pass only (skip backward)"
     )
     parser.add_argument("--no-dropout", action="store_true", help="Disable dropout (enabled by default, p=0.2)")
+    parser.add_argument("--dtype", type=str, default="bfloat16")
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -82,7 +82,7 @@ def main() -> None:
         sys.exit(1)
 
     gpu_name = torch.cuda.get_device_name(0)
-    dtype = get_dtype(DTYPE)
+    dtype = get_dtype(args.dtype)
     dropout_p = 0.0 if args.no_dropout else DROPOUT_P
 
     print(f"\nGPU: {gpu_name}")
