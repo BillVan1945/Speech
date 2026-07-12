@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import torch
+import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -549,16 +550,30 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             device=device,
         )
 
-        grad_weight = torch.zeros(
-            [vocab_size, hidden_dim], dtype=float_dtype if weight_grad_full_precision else weight.dtype, device=device
+        # A float32 vocab tail predicates the whole kernel, including all full blocks. Pad inputs so every
+        # VOCAB_BLOCK in _bwd_autotune_configs is aligned and dummy logits have exactly zero probability.
+        padded_vocab_size = triton.cdiv(vocab_size, 256) * 256
+        vocab_padding = padded_vocab_size - vocab_size
+        if joint_hidden.dtype == torch.float32 and vocab_padding:
+            weight_kernel = F.pad(weight, (0, 0, 0, vocab_padding))
+            bias_kernel = F.pad(bias, (0, vocab_padding), value=-float("inf"))
+        else:
+            padded_vocab_size = vocab_size
+            weight_kernel = weight
+            bias_kernel = bias
+
+        grad_weight_padded = torch.zeros(
+            [padded_vocab_size, hidden_dim],
+            dtype=float_dtype if weight_grad_full_precision else weight.dtype,
+            device=device,
         )
-        grad_bias = torch.zeros(
-            [vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
+        grad_bias_padded = torch.zeros(
+            [padded_vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
         )
 
         bwd_grid = lambda META: (
             triton.cdiv(flattened_batch_size, META["FLATTENED_BATCH_BLOCK"]),
-            triton.cdiv(vocab_size, META["VOCAB_BLOCK"]),
+            triton.cdiv(padded_vocab_size, META["VOCAB_BLOCK"]),
         )
 
         _rnnt_joint_fused_vocab_bwd_triton_kernel[bwd_grid](
@@ -566,26 +581,26 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
-            bias_ptr=bias,
+            weight_ptr=weight_kernel,
+            bias_ptr=bias_kernel,
             log_sum_exp_ptr=log_sum_exp_scores,
             grad_target_scores_ptr=grad_target_scores,
             grad_blank_scores_ptr=grad_blank_scores,
             grad_joint_hidden_out_ptr=grad_joint_hidden,
-            grad_weight_out_ptr=grad_weight,
-            grad_bias_out_ptr=grad_bias,
+            grad_weight_out_ptr=grad_weight_padded,
+            grad_bias_out_ptr=grad_bias_padded,
             max_src_len=src_max_length,
             max_tgt_len_plus_1=tgt_max_length_plus_1,
             flattened_batch_size=flattened_batch_size,
             hidden_dim=hidden_dim,
-            vocab_size=vocab_size,
+            vocab_size=padded_vocab_size,
             blank_id=blank_id,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
         )
 
         # convert grad to desired dtype
-        grad_weight = grad_weight.to(weight.dtype)
-        grad_bias = grad_bias.to(bias.dtype)
+        grad_weight = grad_weight_padded[:vocab_size].to(weight.dtype)
+        grad_bias = grad_bias_padded[:vocab_size].to(bias.dtype)
         grad_joint_hidden = grad_joint_hidden.to(joint_hidden.dtype)
 
         return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None
