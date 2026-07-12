@@ -92,7 +92,7 @@ def main() -> None:
     )
     print(
         f"Shape: enc=[{BATCH_SIZE}, {MAX_TIME}, {HIDDEN_DIM}], "
-        f"pred=[{BATCH_SIZE}, {MAX_TARGETS + 1}, {HIDDEN_DIM}], dtype={DTYPE}, dropout_p={dropout_p}"
+        f"pred=[{BATCH_SIZE}, {MAX_TARGETS + 1}, {HIDDEN_DIM}], dtype={args.dtype}, dropout_p={dropout_p}"
     )
 
     torch.manual_seed(42)
