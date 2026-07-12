@@ -84,6 +84,11 @@ def _bwd_autotune_configs():
         # Larger VB for big vocab — fewer vocab tiles, less atomic contention
         # (64, 64, 256, 8, 2),
         (128, 32, 256, 8, 2),  # best for 1024,8192
+        (128, 32, 256, 4, 2),
+        (128, 32, 256, 8, 1),
+        (256, 32, 128, 8, 2),
+        (256, 32, 128, 4, 2),
+        (256, 32, 128, 8, 1),
     ]
     for fb, hb, vb, nw, ns in candidates:
         configs.append(
