@@ -40,10 +40,10 @@ from tests.collections.asr.turbo_transducer.benchmark_rnnt_joint import (
 # Vocab sizes include the blank symbol. `num_classes = vocab_size - 1` is what
 # `run_benchmark` expects (blank_id == num_classes).
 VOCAB_SIZES: list[int] = [
-    1024,
-    # 1025,
-    8192,
-    # 8193,
+    # 1024,
+    1025,
+    # 8192,
+    8193,
 ]
 
 # Each entry is (joint, joint_backend, loss). Ordering preserved within each
