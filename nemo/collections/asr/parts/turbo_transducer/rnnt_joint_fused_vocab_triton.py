@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import torch
-import torch.nn.functional as F
 import triton
 import triton.language as tl
 
@@ -288,7 +287,6 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     FLATTENED_BATCH_BLOCK: tl.constexpr,
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
-    GROUP_SIZE: tl.constexpr = 64,
     USE_HIGH_PRECISION_MM: tl.constexpr = False,
 ):
     compute_dtype = tl.float32
@@ -301,11 +299,13 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
         else compute_dtype
     )
 
-    # flattened_batch_index = tl.program_id(axis=0)
-    # vocab_block_index = tl.program_id(axis=1)
-    flattened_batch_index, vocab_block_index = tl.swizzle2d(
-        tl.program_id(axis=0), tl.program_id(axis=1), tl.num_programs(axis=0), tl.num_programs(axis=1), GROUP_SIZE
-    )
+    # CUDA enumerates the x grid dimension fastest. Remap that physical order so all vocab blocks for a
+    # flattened-batch tile execute consecutively, preserving joint-hidden and gradient cache locality.
+    num_flattened_batch_blocks = tl.num_programs(axis=0)
+    num_vocab_blocks = tl.num_programs(axis=1)
+    linear_program_index = tl.program_id(axis=1) * num_flattened_batch_blocks + tl.program_id(axis=0)
+    flattened_batch_index = linear_program_index // num_vocab_blocks
+    vocab_block_index = linear_program_index % num_vocab_blocks
     vocab_block_start = vocab_block_index * VOCAB_BLOCK
     flattened_batch_start = flattened_batch_index * FLATTENED_BATCH_BLOCK
 
@@ -550,31 +550,18 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             device=device,
         )
 
-        # A float32 vocab tail predicates the whole kernel, including all full blocks. Pad inputs so every
-        # VOCAB_BLOCK in _bwd_autotune_configs is aligned and dummy logits have exactly zero probability.
-        # TODO: is it possible to avoid magic 256 constant?
-        padded_vocab_size = triton.cdiv(vocab_size, 256) * 256
-        vocab_padding = padded_vocab_size - vocab_size
-        if joint_hidden.dtype == torch.float32 and vocab_padding:
-            weight_kernel = F.pad(weight, (0, 0, 0, vocab_padding))
-            bias_kernel = F.pad(bias, (0, vocab_padding), value=-float("inf"))
-        else:
-            padded_vocab_size = vocab_size
-            weight_kernel = weight
-            bias_kernel = bias
-
-        grad_weight_padded = torch.zeros(
-            [padded_vocab_size, hidden_dim],
+        grad_weight = torch.zeros(
+            [vocab_size, hidden_dim],
             dtype=float_dtype if weight_grad_full_precision else weight.dtype,
             device=device,
         )
-        grad_bias_padded = torch.zeros(
-            [padded_vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
+        grad_bias = torch.zeros(
+            [vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
         )
 
         bwd_grid = lambda META: (
             triton.cdiv(flattened_batch_size, META["FLATTENED_BATCH_BLOCK"]),
-            triton.cdiv(padded_vocab_size, META["VOCAB_BLOCK"]),
+            triton.cdiv(vocab_size, META["VOCAB_BLOCK"]),
         )
 
         _rnnt_joint_fused_vocab_bwd_triton_kernel[bwd_grid](
@@ -582,26 +569,26 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight_kernel,
-            bias_ptr=bias_kernel,
+            weight_ptr=weight,
+            bias_ptr=bias,
             log_sum_exp_ptr=log_sum_exp_scores,
             grad_target_scores_ptr=grad_target_scores,
             grad_blank_scores_ptr=grad_blank_scores,
             grad_joint_hidden_out_ptr=grad_joint_hidden,
-            grad_weight_out_ptr=grad_weight_padded,
-            grad_bias_out_ptr=grad_bias_padded,
+            grad_weight_out_ptr=grad_weight,
+            grad_bias_out_ptr=grad_bias,
             max_src_len=src_max_length,
             max_tgt_len_plus_1=tgt_max_length_plus_1,
             flattened_batch_size=flattened_batch_size,
             hidden_dim=hidden_dim,
-            vocab_size=padded_vocab_size,
+            vocab_size=vocab_size,
             blank_id=blank_id,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
         )
 
         # convert grad to desired dtype
-        grad_weight = grad_weight_padded[:vocab_size].to(weight.dtype)
-        grad_bias = grad_bias_padded[:vocab_size].to(bias.dtype)
+        grad_weight = grad_weight.to(weight.dtype)
+        grad_bias = grad_bias.to(bias.dtype)
         grad_joint_hidden = grad_joint_hidden.to(joint_hidden.dtype)
 
         return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None
