@@ -218,13 +218,13 @@ def run_benchmark(
         if not forward_only:
             loss_val.backward()
         del loss_val
+    clear_grads()
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
 
     # Memory: forward only
     torch.cuda.reset_peak_memory_stats()
     baseline_memory = torch.cuda.memory_allocated()
-    clear_grads()
     loss_val = run_fwd()
     torch.cuda.synchronize()
     forward_memory = torch.cuda.max_memory_allocated() - baseline_memory
