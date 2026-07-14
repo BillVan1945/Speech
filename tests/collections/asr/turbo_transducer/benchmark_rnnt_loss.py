@@ -16,7 +16,7 @@
 Benchmark script to compare Triton vs Numba implementations of RNN-T loss.
 
 Usage:
-    python benchmark_rnnt_loss.py --loss-name turbo_transducer --dtype float32 --vocab-size 1024
+    python benchmark_rnnt_loss.py --loss-name turbo_rnnt --dtype float32 --vocab-size 1024
     python benchmark_rnnt_loss.py --loss-name warprnnt_numba --dtype bfloat16 --vocab-size 1025
 """
 
@@ -75,7 +75,7 @@ def benchmark_rnnt_loss(
     Benchmark RNN-T loss implementation.
 
     Args:
-        loss_name: Loss implementation name ('warprnnt_numba' or 'turbo_transducer')
+        loss_name: Loss implementation name ('warprnnt_numba' or 'turbo_rnnt')
         dtype: Data type for tensors
         vocab_size: Vocabulary size (V)
         warmup_iters: Number of warmup iterations
@@ -289,7 +289,7 @@ def main():
         '--loss-name',
         type=str,
         required=True,
-        choices=['warprnnt_numba', 'turbo_transducer'],
+        choices=['warprnnt_numba', 'turbo_rnnt'],
         help='Loss implementation to benchmark',
     )
     parser.add_argument(
