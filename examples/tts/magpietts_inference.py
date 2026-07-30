@@ -134,6 +134,8 @@ def append_metrics_to_csv(csv_path: str, checkpoint_name: str, dataset: str, met
         metrics.get('eou_silence_rate', ''),
         metrics.get('eou_noise_rate', ''),
         metrics.get('eou_error_rate', ''),
+        metrics.get('katakana_cer_filewise_avg', ''),
+        metrics.get('katakana_cer_cumulative', ''),
     ]
     with open(csv_path, "a") as f:
         f.write(",".join(str(v) for v in values) + "\n")
@@ -216,7 +218,9 @@ def run_inference_and_evaluation(
         violin_plot_metrics.remove('utmosv2')
 
     # Build full checkpoint identifier (include MoE info if present)
-    full_checkpoint_name = f"{checkpoint_name}_{moe_info}{inference_config.build_identifier()}_SV_{eval_config.sv_model}_{eval_config.language}"
+    full_checkpoint_name = (
+        f"{checkpoint_name}_{moe_info}{inference_config.build_identifier()}_SV_{eval_config.sv_model}"
+    )
 
     # Tracking metrics across datasets
     ssim_per_dataset = []
@@ -230,7 +234,8 @@ def run_inference_and_evaluation(
         "ssim_pred_gt_avg_alternate,ssim_pred_context_avg_alternate,"
         "ssim_gt_context_avg_alternate,cer_gt_audio_cumulative,wer_gt_audio_cumulative,"
         "utmosv2_avg,total_gen_audio_seconds,frechet_codec_distance,"
-        "eou_cutoff_rate,eou_silence_rate,eou_noise_rate,eou_error_rate"
+        "eou_cutoff_rate,eou_silence_rate,eou_noise_rate,eou_error_rate,"
+        "katakana_cer_filewise_avg,katakana_cer_cumulative"
     )
 
     for dataset in datasets:
@@ -261,7 +266,7 @@ def run_inference_and_evaluation(
         }
 
         # Setup output directories
-        eval_dir = os.path.join(out_dir, f"{full_checkpoint_name}_{dataset}")
+        eval_dir = os.path.join(out_dir, f"{full_checkpoint_name}_{language}_{dataset}")
         audio_dir = os.path.join(eval_dir, "audio")
         os.makedirs(eval_dir, exist_ok=True)
 
@@ -336,12 +341,14 @@ def run_inference_and_evaluation(
             filewise_metrics_all_repeats.extend(filewise_metrics)
 
             # Save metrics
-            with open(os.path.join(eval_dir, f"{dataset}_metrics_{repeat_idx}.json"), "w") as f:
+            metrics_path = os.path.join(eval_dir, f"{dataset}_metrics_{repeat_idx}.json")
+            with open(metrics_path, "w") as f:
                 json.dump(metrics, f, indent=4)
 
             sorted_filewise = sorted(filewise_metrics, key=lambda x: x.get('cer', 0), reverse=True)
-            with open(os.path.join(eval_dir, f"{dataset}_filewise_metrics_{repeat_idx}.json"), "w") as f:
-                json.dump(sorted_filewise, f, indent=4)
+            filewise_metrics_path = os.path.join(eval_dir, f"{dataset}_filewise_metrics_{repeat_idx}.json")
+            with open(filewise_metrics_path, "w", encoding="utf-8") as f:
+                json.dump(sorted_filewise, f, indent=4, ensure_ascii=False)
 
             # Append to per-run CSV
             append_metrics_to_csv(per_run_csv, full_checkpoint_name, dataset, metrics)
