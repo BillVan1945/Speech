@@ -36,6 +36,7 @@ import torch
 import torch.nn.functional as F
 
 from nemo.collections.asr.losses.rnnt import RNNTLoss
+from nemo.collections.asr.modules.rnnt import RNNTJoint
 from nemo.collections.asr.parts.turbo_transducer.rnnt_fused_joint import rnnt_fused_joint
 from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import rnnt_joint_fused_vocab
 from nemo.collections.asr.parts.turbo_transducer.rnnt_loss_triton import rnnt_loss_from_logprobs_triton
@@ -52,6 +53,7 @@ class BenchmarkResults:
     joint: str
     joint_backend: str
     loss: str
+    fused_batch_size: int
     dtype: str
     batch_size: int
     max_time: int
@@ -92,6 +94,36 @@ def _normalize_joint_backend(joint: str, joint_backend: str | None) -> str:
     return joint_backend
 
 
+def _create_standard_joint(
+    hidden_dim: int,
+    vocab_size: int,
+    dropout_p: float,
+    fused_batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> RNNTJoint:
+    """Create NeMo's standard Joint over already-projected benchmark inputs."""
+    joint_module = RNNTJoint(
+        jointnet={
+            'encoder_hidden': hidden_dim,
+            'pred_hidden': hidden_dim,
+            'joint_hidden': hidden_dim,
+            'activation': 'relu',
+            'dropout': dropout_p,
+        },
+        num_classes=vocab_size - 1,
+        log_softmax=False,
+        fuse_loss_wer=fused_batch_size > 0,
+        fused_batch_size=fused_batch_size if fused_batch_size > 0 else None,
+    )
+    joint_module.enc = torch.nn.Identity()
+    joint_module.pred = torch.nn.Identity()
+    joint_module = joint_module.to(device=device, dtype=dtype)
+    vocab_projection = joint_module.joint_net[-1]
+    vocab_projection.weight = torch.nn.Parameter(torch.rand(vocab_size, hidden_dim, device=device, dtype=dtype))
+    return joint_module
+
+
 def run_benchmark(
     joint: str,
     loss: str,
@@ -106,6 +138,7 @@ def run_benchmark(
     max_targets: int = 72,
     forward_only: bool = False,
     dropout_p: float = 0.2,
+    fused_batch_size: int = 0,
 ) -> BenchmarkResults:
     """Run one (joint, joint_backend, loss, vocab) benchmark and return results."""
     if joint not in VALID_JOINTS:
@@ -114,6 +147,12 @@ def run_benchmark(
         raise ValueError(f"Invalid loss={loss!r}. Expected one of {VALID_LOSSES}.")
     if joint != "standard" and loss != "turbo_rnnt":
         raise ValueError(f"Joint={joint!r} requires loss='turbo_rnnt', got loss={loss!r}.")
+    if fused_batch_size < 0:
+        raise ValueError(f"fused_batch_size must be non-negative, got {fused_batch_size}.")
+    if fused_batch_size > batch_size:
+        raise ValueError(f"fused_batch_size must not exceed batch_size ({batch_size}), got {fused_batch_size}.")
+    if joint != "standard" and fused_batch_size > 0:
+        raise ValueError("fused_batch_size is supported only for joint='standard'.")
 
     joint_backend = _normalize_joint_backend(joint, joint_backend)
 
@@ -127,8 +166,20 @@ def run_benchmark(
 
     enc_proj = torch.randn(batch_size, max_time, hidden_dim, device=device, dtype=dtype, requires_grad=True)
     pred_proj = torch.randn(batch_size, max_target_plus_1, hidden_dim, device=device, dtype=dtype, requires_grad=True)
-    linear = torch.nn.Linear(hidden_dim, vocab_size, device=device, dtype=dtype)
-    linear.weight = torch.nn.Parameter(torch.rand(vocab_size, hidden_dim, device=device, dtype=dtype))
+    standard_joint = None
+    if joint == "standard":
+        standard_joint = _create_standard_joint(
+            hidden_dim=hidden_dim,
+            vocab_size=vocab_size,
+            dropout_p=dropout_p,
+            fused_batch_size=fused_batch_size,
+            device=device,
+            dtype=dtype,
+        )
+        linear = standard_joint.joint_net[-1]
+    else:
+        linear = torch.nn.Linear(hidden_dim, vocab_size, device=device, dtype=dtype)
+        linear.weight = torch.nn.Parameter(torch.rand(vocab_size, hidden_dim, device=device, dtype=dtype))
     targets = torch.randint(0, blank_id, (batch_size, max_targets), device=device, dtype=torch.long)
     src_lengths = torch.full([batch_size], max_time, device=device, dtype=torch.long)
     tgt_lengths = torch.full([batch_size], max_targets, device=device, dtype=torch.long)
@@ -145,13 +196,23 @@ def run_benchmark(
             loss_kwargs={'fastemit_lambda': 0.0},
             reduction='sum',
         )
+        if fused_batch_size > 0:
+            standard_joint.set_loss(loss_module)
+            # Required by RNNTJoint's fused path, but unused when compute_wer=False.
+            standard_joint.set_wer(object())
 
     def run_fwd_standard() -> torch.Tensor:
-        hidden = enc_proj.unsqueeze(2) + pred_proj.unsqueeze(1)
-        hidden.relu_()
-        if dropout_p > 0.0:
-            hidden = F.dropout(hidden, p=dropout_p, training=True)
-        logits = linear(hidden)
+        if fused_batch_size > 0:
+            loss_value, _, _, _ = standard_joint(
+                encoder_outputs=enc_proj.transpose(1, 2),
+                decoder_outputs=pred_proj.transpose(1, 2),
+                encoder_lengths=src_lengths,
+                transcripts=targets,
+                transcript_lengths=tgt_lengths,
+            )
+            return loss_value
+
+        logits = standard_joint(encoder_outputs=enc_proj.transpose(1, 2), decoder_outputs=pred_proj.transpose(1, 2))
         return loss_module(log_probs=logits, targets=targets, input_lengths=src_lengths, target_lengths=tgt_lengths)
 
     def run_fwd_fused_vocab() -> torch.Tensor:
@@ -293,6 +354,7 @@ def run_benchmark(
         joint=joint,
         joint_backend=joint_backend,
         loss=loss,
+        fused_batch_size=fused_batch_size,
         dtype=dtype_str,
         batch_size=batch_size,
         max_time=max_time,
@@ -334,6 +396,7 @@ TABLE_COLUMNS: tuple[tuple[str, str, callable], ...] = (
     ("Joint", "joint", _fmt_str),
     ("Joint Backend", "joint_backend", _fmt_str),
     ("Loss", "loss", _fmt_str),
+    ("Fused Batch Size", "fused_batch_size", _fmt_int),
     ("Input Memory", "input_memory_gb", _fmt_mem),
     ("Fwd Memory", "forward_memory_gb", _fmt_mem),
     ("Bwd Memory", "backward_peak_memory_gb", _fmt_mem),
@@ -434,6 +497,12 @@ def main():
         help='Data type (default: bfloat16)',
     )
     parser.add_argument('--batch-size', type=int, default=64)
+    parser.add_argument(
+        '--fused-batch-size',
+        type=int,
+        default=0,
+        help="Sub-batch size for standard Joint+loss computation; 0 disables fused batching (default: 0)",
+    )
     parser.add_argument('--max-time', type=int, default=150)
     parser.add_argument('--max-targets', type=int, default=72, help='Maximum target sequence length (default: 72)')
     parser.add_argument('--hidden-dim', type=int, default=640)
@@ -475,12 +544,13 @@ def main():
         max_targets=args.max_targets,
         forward_only=args.forward_only,
         dropout_p=dropout_p,
+        fused_batch_size=args.fused_batch_size,
     )
 
     print(
         f"\nShape: enc=[{result.batch_size}, {result.max_time}, {result.hidden_dim}], "
         f"pred=[{result.batch_size}, {result.max_target_plus_1}, {result.hidden_dim}], "
-        f"vocab_size={result.vocab_size}, dtype={result.dtype}"
+        f"vocab_size={result.vocab_size}, dtype={result.dtype}, fused_batch_size={result.fused_batch_size}"
     )
     print_results_table([result])
 

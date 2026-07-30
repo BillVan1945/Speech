@@ -18,6 +18,74 @@ import torch
 from tests.collections.asr.turbo_transducer import benchmark_rnnt_joint
 
 
+class _RecordingLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.reduction = "sum"
+        self.batch_sizes = []
+
+    def forward(self, log_probs, targets, input_lengths, target_lengths):
+        self.batch_sizes.append(log_probs.shape[0])
+        return log_probs.sum(dim=(1, 2, 3))
+
+    def reduce(self, losses, target_lengths):
+        return torch.cat(losses).sum()
+
+
+@pytest.mark.unit
+def test_standard_joint_uses_native_fused_batching():
+    batch_size, hidden_dim, max_time, max_targets, vocab_size = 5, 4, 3, 2, 7
+    joint = benchmark_rnnt_joint._create_standard_joint(
+        hidden_dim=hidden_dim,
+        vocab_size=vocab_size,
+        dropout_p=0.0,
+        fused_batch_size=2,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+    loss = _RecordingLoss()
+    joint.set_loss(loss)
+    joint.set_wer(object())
+    encoder_outputs = torch.randn(batch_size, hidden_dim, max_time, requires_grad=True)
+    decoder_outputs = torch.randn(batch_size, hidden_dim, max_targets + 1, requires_grad=True)
+    targets = torch.randint(0, vocab_size - 1, (batch_size, max_targets))
+    source_lengths = torch.full((batch_size,), max_time, dtype=torch.long)
+    target_lengths = torch.full((batch_size,), max_targets, dtype=torch.long)
+
+    loss_value, wer, wer_num, wer_denom = joint(
+        encoder_outputs=encoder_outputs,
+        decoder_outputs=decoder_outputs,
+        encoder_lengths=source_lengths,
+        transcripts=targets,
+        transcript_lengths=target_lengths,
+    )
+    loss_value.backward()
+
+    assert joint.fuse_loss_wer
+    assert joint.fused_batch_size == 2
+    assert isinstance(joint.enc, torch.nn.Identity)
+    assert isinstance(joint.pred, torch.nn.Identity)
+    assert loss.batch_sizes == [2, 2, 1]
+    assert encoder_outputs.grad is not None
+    assert decoder_outputs.grad is not None
+    assert (wer, wer_num, wer_denom) == (None, None, None)
+
+
+@pytest.mark.unit
+def test_standard_joint_disables_fused_batching_by_default():
+    joint = benchmark_rnnt_joint._create_standard_joint(
+        hidden_dim=4,
+        vocab_size=7,
+        dropout_p=0.0,
+        fused_batch_size=0,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    assert not joint.fuse_loss_wer
+    assert joint.fused_batch_size is None
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_forward_memory_baseline_excludes_warmup_gradients(monkeypatch):
     batch_size = 2

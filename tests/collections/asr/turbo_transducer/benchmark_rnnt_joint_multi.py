@@ -77,6 +77,12 @@ def main() -> None:
     )
     parser.add_argument("--no-dropout", action="store_true", help="Disable dropout (enabled by default, p=0.2)")
     parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument(
+        "--fused-batch-size",
+        type=int,
+        default=0,
+        help="Sub-batch size for standard Joint+loss computation; 0 disables fused batching (default: 0)",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -94,7 +100,8 @@ def main() -> None:
     )
     print(
         f"Shape: enc=[{BATCH_SIZE}, {MAX_TIME}, {HIDDEN_DIM}], "
-        f"pred=[{BATCH_SIZE}, {MAX_TARGETS + 1}, {HIDDEN_DIM}], dtype={args.dtype}, dropout_p={dropout_p}"
+        f"pred=[{BATCH_SIZE}, {MAX_TARGETS + 1}, {HIDDEN_DIM}], dtype={args.dtype}, dropout_p={dropout_p}, "
+        f"standard_fused_batch_size={args.fused_batch_size}"
     )
 
     torch.manual_seed(42)
@@ -120,6 +127,7 @@ def main() -> None:
                 max_targets=MAX_TARGETS,
                 forward_only=args.forward_only,
                 dropout_p=dropout_p,
+                fused_batch_size=args.fused_batch_size if joint == "standard" else 0,
             )
             results.append(result)
 
