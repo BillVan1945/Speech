@@ -18,3 +18,4 @@ from nemo.utils.enum import PrettyStrEnum
 class TurboTransducerBackend(PrettyStrEnum):
     TRITON = "triton"
     CUTILE = "cutile"
+    TORCH = "torch"
