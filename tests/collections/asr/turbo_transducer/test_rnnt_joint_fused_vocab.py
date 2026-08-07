@@ -16,10 +16,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import (
-    RnntJointFusedVocabBackend,
-    rnnt_joint_fused_vocab,
-)
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
+from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab import rnnt_joint_fused_vocab
 from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import rnnt_logprobs_torch
 from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
 from tests.collections.asr.decoding.utils import avoid_sync_operations
@@ -39,12 +37,12 @@ def _reference_joint_vocab_logprobs(joint_hidden, weight, bias, targets, src_len
 
 _BACKEND_PARAMS = [
     pytest.param(
-        RnntJointFusedVocabBackend.TRITON,
+        TurboTransducerBackend.TRITON,
         marks=pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed"),
         id="triton",
     ),
     pytest.param(
-        RnntJointFusedVocabBackend.CUTILE,
+        TurboTransducerBackend.CUTILE,
         marks=pytest.mark.skipif(not CUTILE_AVAILABLE, reason="cuTile is not installed"),
         id="cutile",
     ),
@@ -71,7 +69,7 @@ class TestRnntJointVocabLogProbs:
     def test_forward_and_backward(self, backend, shape, float_dtype):
         device = torch.device("cuda")
         torch.manual_seed(42)
-        is_triton = backend == RnntJointFusedVocabBackend.TRITON
+        is_triton = backend == TurboTransducerBackend.TRITON
         # cuTile path doesn't yet honor use_high_precision and runs through tensor-core mma.
         use_high_precision = is_triton
         batch_size, src_length, tgt_length, hidden_dim, vocab_size_no_blank = shape
@@ -169,7 +167,7 @@ class TestRnntJointVocabLogProbs:
     def test_variable_lengths(self, backend):
         device = torch.device("cuda")
         torch.manual_seed(42)
-        is_triton = backend == RnntJointFusedVocabBackend.TRITON
+        is_triton = backend == TurboTransducerBackend.TRITON
         use_high_precision = is_triton
         batch_size = 4
         src_length = 16
