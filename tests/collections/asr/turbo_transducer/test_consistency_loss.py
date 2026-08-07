@@ -16,6 +16,7 @@ import pytest
 import torch
 
 from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 
@@ -82,7 +83,7 @@ def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduc
     def run(use_triton: bool):
         module = ConsistencyRNNTLoss(
             symmetrical=symmetrical,
-            use_triton=use_triton,
+            backend=TurboTransducerBackend.TRITON if use_triton else TurboTransducerBackend.TORCH,
             reduction=reduction,
             blank_id=V - 1,
         )
