@@ -15,19 +15,14 @@
 
 import torch
 
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
-from nemo.utils.enum import PrettyStrEnum
 
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_triton import rnnt_joint_fused_vocab_triton
 
 if CUTILE_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_joint_fused_vocab_cutile import rnnt_joint_fused_vocab_cutile
-
-
-class RnntJointFusedVocabBackend(PrettyStrEnum):
-    TRITON = "triton"
-    CUTILE = "cutile"
 
 
 def rnnt_joint_fused_vocab(
@@ -41,20 +36,20 @@ def rnnt_joint_fused_vocab(
     use_high_precision_mm: bool = False,
     input_grad_full_precision: bool = False,
     weight_grad_full_precision: bool = False,
-    backend: str | RnntJointFusedVocabBackend | None = RnntJointFusedVocabBackend.TRITON,
+    backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
 ):
-    backend = RnntJointFusedVocabBackend(backend) if backend is not None else None
+    backend = TurboTransducerBackend(backend) if backend is not None else None
 
     if backend is None:
         if TRITON_AVAILABLE:
-            backend = RnntJointFusedVocabBackend.TRITON
+            backend = TurboTransducerBackend.TRITON
         elif CUTILE_AVAILABLE:
-            backend = RnntJointFusedVocabBackend.CUTILE
+            backend = TurboTransducerBackend.CUTILE
         else:
             raise Exception("No backend")
 
     match backend:
-        case RnntJointFusedVocabBackend.TRITON:
+        case TurboTransducerBackend.TRITON:
             if not TRITON_AVAILABLE:
                 raise ModuleNotFoundError("Triton is unavailable")
             target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_triton(
@@ -69,7 +64,7 @@ def rnnt_joint_fused_vocab(
                 input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
             )
-        case RnntJointFusedVocabBackend.CUTILE:
+        case TurboTransducerBackend.CUTILE:
             if not CUTILE_AVAILABLE:
                 raise ModuleNotFoundError("cuTile is unavailable")
             target_logprobs, blank_logprobs = rnnt_joint_fused_vocab_cutile(

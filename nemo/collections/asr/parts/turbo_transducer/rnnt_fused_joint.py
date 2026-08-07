@@ -15,16 +15,11 @@
 
 import torch
 
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.core.utils.optional_libs import CUTILE_AVAILABLE, TRITON_AVAILABLE
-from nemo.utils.enum import PrettyStrEnum
 
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_fused_joint_triton import rnnt_fused_joint_triton
-
-
-class RnntFusedJointBackend(PrettyStrEnum):
-    TRITON = "triton"
-    CUTILE = "cutile"
 
 
 def rnnt_fused_joint(
@@ -42,20 +37,20 @@ def rnnt_fused_joint(
     use_high_precision_mm: bool = False,
     input_grad_full_precision: bool = True,
     weight_grad_full_precision: bool = True,
-    backend: str | RnntFusedJointBackend | None = RnntFusedJointBackend.TRITON,
+    backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
 ):
-    backend = RnntFusedJointBackend(backend) if backend is not None else None
+    backend = TurboTransducerBackend(backend) if backend is not None else None
 
     if backend is None:
         if TRITON_AVAILABLE:
-            backend = RnntFusedJointBackend.TRITON
+            backend = TurboTransducerBackend.TRITON
         elif CUTILE_AVAILABLE:
-            backend = RnntFusedJointBackend.CUTILE
+            backend = TurboTransducerBackend.CUTILE
         else:
             raise Exception("No backend")
 
     match backend:
-        case RnntFusedJointBackend.TRITON:
+        case TurboTransducerBackend.TRITON:
             if not TRITON_AVAILABLE:
                 raise ModuleNotFoundError("Triton is unavailable")
             target_logprobs, blank_logprobs = rnnt_fused_joint_triton(
@@ -74,7 +69,7 @@ def rnnt_fused_joint(
                 input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
             )
-        case RnntFusedJointBackend.CUTILE:
+        case TurboTransducerBackend.CUTILE:
             if not CUTILE_AVAILABLE:
                 raise ModuleNotFoundError("cuTile is unavailable")
             raise NotImplementedError("cuTile support not yet implemented")

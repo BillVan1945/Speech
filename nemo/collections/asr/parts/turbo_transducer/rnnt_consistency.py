@@ -85,10 +85,16 @@ class ConsistencyRNNTLoss(nn.Module):
         super().__init__()
         self.reduction = ConsistencyRNNTReductionType(reduction)
         self.symmetrical = symmetrical
-        self.backend = TurboTransducerBackend(backend) if backend is not None else TurboTransducerBackend.TRITON
-        if self.backend is not TurboTransducerBackend.TRITON:
-            raise NotImplementedError("Only Triton backend is now supported")
+        self._backend = TurboTransducerBackend(backend) if backend is not None else None  # None means "auto"
         self.blank_id = blank_id
+
+    def get_runtime_backend(self, input_: torch.Tensor) -> TurboTransducerBackend:
+        if self._backend is not None:
+            # backend if forced
+            return self._backend
+        if input_.device.type != "cuda":
+            return TurboTransducerBackend.TORCH
+        return TurboTransducerBackend.TRITON if TRITON_AVAILABLE else TurboTransducerBackend.TORCH
 
     def forward(
         self,
@@ -116,7 +122,8 @@ class ConsistencyRNNTLoss(nn.Module):
         )
         mask = mask_blank
 
-        if self.backend is TurboTransducerBackend.TRITON:
+        runtime_backend = self.get_runtime_backend(teacher_logits)
+        if runtime_backend is TurboTransducerBackend.TRITON:
             kl_loss = kl_loss_triton(
                 teacher_logits=teacher_logits,
                 student_logits=student_logits,
@@ -144,7 +151,8 @@ class ConsistencyRNNTLoss(nn.Module):
                     kl_loss_value = kl_loss.mean()
                 case _:
                     raise NotImplementedError(f"Unsupported reduction {self.reduction}")
-        else:
+            return kl_loss_value
+        elif runtime_backend is TurboTransducerBackend.TORCH:
             teacher_logprobs = F.log_softmax(teacher_logits, dim=-1)
             student_logprobs = F.log_softmax(student_logits, dim=-1)
 
@@ -179,4 +187,6 @@ class ConsistencyRNNTLoss(nn.Module):
                     kl_loss_value = ((kl_loss * weights).sum(dim=(1, 2)) / (weights.sum(dim=(1, 2)) + EPS)).mean()
                 case _:
                     raise NotImplementedError(f"Unsupported reduction {self.reduction}")
-        return kl_loss_value
+            return kl_loss_value
+        else:
+            raise NotImplementedError(f"Unsupported backend {runtime_backend}")
