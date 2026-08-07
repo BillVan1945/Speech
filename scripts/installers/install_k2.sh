@@ -15,7 +15,7 @@
 # limitations under the License.
 
 K2_REPO=https://github.com/k2-fsa/k2
-LATEST_RELEASE=e01ad3d # fix for PyTorch 2.8.0
+LATEST_RELEASE=ec31d2c # supports PyTorch 2.13.0
 # uncomment the following line after the next k2 version is released (>1.24.4)
 #LATEST_RELEASE=$(git -c 'versionsort.suffix=-' \
 #    ls-remote --exit-code --refs --sort='version:refname' --tags ${K2_REPO} '*.*' \
