@@ -15,8 +15,8 @@
 import pytest
 import torch
 
-from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
 from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
+from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 
@@ -67,7 +67,7 @@ def test_consistency_full_loss(device: torch.device, symmetrical: bool, reductio
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.skipif(not TRITON_AVAILABLE, reason="triton unavailable")
 @pytest.mark.parametrize("symmetrical", [True, False])
-@pytest.mark.parametrize("reduction", ["mean_volume", "mean", "p_non_blank", "p_non_blank_with_grad"])
+@pytest.mark.parametrize("reduction", ["mean_volume", "mean"])
 def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduction: str):
     torch.manual_seed(123)
     device = torch.device("cuda")
@@ -85,7 +85,6 @@ def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduc
             symmetrical=symmetrical,
             backend=TurboTransducerBackend.TRITON if use_triton else TurboTransducerBackend.TORCH,
             reduction=reduction,
-            blank_id=V - 1,
         )
         teacher_logits = teacher_logits_base.detach().clone().requires_grad_(True)
         student_logits = student_logits_base.detach().clone().requires_grad_(True)
@@ -134,39 +133,6 @@ def requires_cuda(fn):
 
 class TestKLLossTriton:
     """Tests for kl_loss_triton Triton implementation."""
-
-    @pytest.mark.unit
-    @requires_cuda
-    @pytest.mark.parametrize("symmetrical", [True, False])
-    @pytest.mark.parametrize("weighted", ["p_non_blank", "p_non_blank_with_grad"])
-    def test_kl_loss_triton_weighted_returns_batch_vector(self, symmetrical: bool, weighted: str):
-        from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency_triton import kl_loss_triton
-
-        torch.manual_seed(42)
-        device = torch.device("cuda")
-        B, T, U_plus_1, V = 3, 4, 3, 8
-
-        teacher_logits = torch.randn(B, T, U_plus_1, V, device=device, dtype=torch.float32, requires_grad=True)
-        student_logits = torch.randn(B, T, U_plus_1, V, device=device, dtype=torch.float32, requires_grad=True)
-        mask = torch.ones(B, T, U_plus_1, dtype=torch.bool, device=device)
-
-        loss = kl_loss_triton(
-            teacher_logits=teacher_logits,
-            student_logits=student_logits,
-            mask=mask,
-            symmetrical=symmetrical,
-            blank_id=V - 1,
-            weighted=weighted,
-        )
-        assert loss.shape == (B,)
-        assert loss.ndim == 1
-
-        loss.mean().backward()
-        assert student_logits.grad is not None
-        if symmetrical or weighted == "p_non_blank_with_grad":
-            assert teacher_logits.grad is not None
-        else:
-            assert teacher_logits.grad is None
 
     @pytest.mark.unit
     @requires_cuda

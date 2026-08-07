@@ -24,14 +24,10 @@ from nemo.utils.enum import PrettyStrEnum
 if TRITON_AVAILABLE:
     from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency_triton import kl_loss_triton
 
-EPS = 1e-5
-
 
 class ConsistencyRNNTReductionType(PrettyStrEnum):
     MEAN = "mean"
     MEAN_VOLUME = "mean_volume"
-    P_NON_BLANK = "p_non_blank"
-    P_NON_BLANK_WITH_GRAD = "p_non_blank_with_grad"
 
 
 def kl_loss_torch(
@@ -79,14 +75,12 @@ class ConsistencyRNNTLoss(nn.Module):
         self,
         symmetrical: bool = True,
         reduction: str | ConsistencyRNNTReductionType = 'mean_volume',
-        blank_id: int | None = None,
         backend: str | TurboTransducerBackend | None = None,
     ):
         super().__init__()
         self.reduction = ConsistencyRNNTReductionType(reduction)
         self.symmetrical = symmetrical
         self._backend = TurboTransducerBackend(backend) if backend is not None else None  # None means "auto"
-        self.blank_id = blank_id
 
     def get_runtime_backend(self, input_: torch.Tensor) -> TurboTransducerBackend:
         if self._backend is not None:
@@ -129,64 +123,21 @@ class ConsistencyRNNTLoss(nn.Module):
                 student_logits=student_logits,
                 mask=mask,
                 symmetrical=self.symmetrical,
-                blank_id=self.blank_id,
-                weighted=(
-                    str(self.reduction)
-                    if self.reduction
-                    in {ConsistencyRNNTReductionType.P_NON_BLANK, ConsistencyRNNTReductionType.P_NON_BLANK_WITH_GRAD}
-                    else None
-                ),
             )
-
-            match self.reduction:
-                case ConsistencyRNNTReductionType.MEAN:
-                    kl_loss_value = kl_loss.sum() / mask.sum().clamp(min=1)
-                case ConsistencyRNNTReductionType.MEAN_VOLUME:
-                    kl_loss_value = (kl_loss.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1)).mean()
-                case ConsistencyRNNTReductionType.P_NON_BLANK:
-                    assert kl_loss.dim() == 1  # already reduced
-                    kl_loss_value = kl_loss.mean()
-                case ConsistencyRNNTReductionType.P_NON_BLANK_WITH_GRAD:
-                    assert kl_loss.dim() == 1  # already reduced
-                    kl_loss_value = kl_loss.mean()
-                case _:
-                    raise NotImplementedError(f"Unsupported reduction {self.reduction}")
-            return kl_loss_value
         elif runtime_backend is TurboTransducerBackend.TORCH:
-            teacher_logprobs = F.log_softmax(teacher_logits, dim=-1)
-            student_logprobs = F.log_softmax(student_logits, dim=-1)
-
             kl_loss = kl_loss_torch(
-                teacher_logprobs=teacher_logprobs,
-                student_logprobs=student_logprobs,
+                teacher_logprobs=F.log_softmax(teacher_logits, dim=-1),
+                student_logprobs=F.log_softmax(student_logits, dim=-1),
                 mask=mask,
                 symmetrical=self.symmetrical,
             )
-
-            def get_non_blank_weights():
-                if self.symmetrical:
-                    blank_probs = (
-                        torch.exp(teacher_logprobs[..., self.blank_id])
-                        + torch.exp(student_logprobs[..., self.blank_id])
-                    ) / 2
-                else:
-                    blank_probs = torch.exp(teacher_logprobs[..., self.blank_id])
-                weights = (1 - blank_probs) * mask
-                return weights
-
-            match self.reduction:
-                case ConsistencyRNNTReductionType.MEAN:
-                    kl_loss_value = kl_loss.sum() / mask.sum().clamp(min=1)
-                case ConsistencyRNNTReductionType.MEAN_VOLUME:
-                    kl_loss_value = (kl_loss.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1)).mean()
-                case ConsistencyRNNTReductionType.P_NON_BLANK:
-                    weights = get_non_blank_weights().detach()
-                    kl_loss_value = ((kl_loss * weights).sum(dim=(1, 2)) / (weights.sum(dim=(1, 2)) + EPS)).mean()
-                case ConsistencyRNNTReductionType.P_NON_BLANK_WITH_GRAD:
-                    weights = get_non_blank_weights()
-                    kl_loss_value = ((kl_loss * weights).sum(dim=(1, 2)) / (weights.sum(dim=(1, 2)) + EPS)).mean()
-                case _:
-                    raise NotImplementedError(f"Unsupported reduction {self.reduction}")
-            return kl_loss_value
         else:
             raise NotImplementedError(f"Unsupported backend {runtime_backend}")
+
+        match self.reduction:
+            case ConsistencyRNNTReductionType.MEAN:
+                return kl_loss.sum() / mask.sum().clamp(min=1)
+            case ConsistencyRNNTReductionType.MEAN_VOLUME:
+                return (kl_loss.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1)).mean()
+            case _:
+                raise NotImplementedError(f"Unsupported reduction {self.reduction}")
