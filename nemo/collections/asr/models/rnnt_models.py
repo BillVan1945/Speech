@@ -829,7 +829,6 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 consistency_loss_value = self.consistency_loss(
                     teacher_logits=joint[:batch_size_half],
                     student_logits=joint[batch_size_half:],
-                    targets=transcript[:batch_size_half],
                     src_lengths=encoded_len[:batch_size_half],
                     tgt_lengths=target_length[:batch_size_half],
                 )

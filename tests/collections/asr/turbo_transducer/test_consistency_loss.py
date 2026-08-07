@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
-from nemo.core.utils.optional_libs import K2_AVAILABLE, TRITON_AVAILABLE
+from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 
 def get_devices_for_testing(use_cpu_always: bool = False) -> list[torch.device]:
@@ -56,7 +56,6 @@ def test_consistency_full_loss(device: torch.device, symmetrical: bool, reductio
     loss = module(
         teacher_logits=teacher_logits,
         student_logits=student_logits,
-        targets=targets,
     )
     assert loss.ndim == 0
     assert loss >= 0
@@ -92,7 +91,6 @@ def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduc
         loss = module(
             teacher_logits=teacher_logits,
             student_logits=student_logits,
-            targets=targets,
             src_lengths=src_lengths,
             tgt_lengths=tgt_lengths,
         )
