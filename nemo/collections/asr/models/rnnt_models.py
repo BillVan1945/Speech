@@ -39,11 +39,7 @@ from nemo.collections.asr.parts.mixins import (
 )
 from nemo.collections.asr.parts.preprocessing.segment import ChannelSelectorType
 from nemo.collections.asr.parts.submodules.rnnt_decoding import RNNTDecoding, RNNTDecodingConfig
-from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import (
-    ConsistencyFullRNNTLoss,
-    ConsistencyGraphRNNTLoss,
-    ConsistencyRNNTLoss,
-)
+from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
 from nemo.collections.asr.parts.utils.asr_batching import get_semi_sorted_batch_sampler
 from nemo.collections.asr.parts.utils.rnnt_utils import Hypothesis
 from nemo.collections.asr.parts.utils.timestamp_utils import process_timestamp_outputs
@@ -105,28 +101,11 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 if loss_name == "tdt":
                     raise NotImplementedError
                 self.use_double_batch = True
-                if consistency_loss_cfg.get("use_graph_rnnt", False):
-                    logging.info(f"Instantiated graph consistency loss with params: {consistency_loss_cfg}")
-                    self.consistency_loss = ConsistencyGraphRNNTLoss(
-                        blank_id=num_classes,
-                        symmetrical=consistency_loss_cfg.get("symmetrical", True),
-                    )
-                elif consistency_loss_cfg.get("use_all_logits", False):
-                    logging.info(f"Instantiated full consistency loss with params: {consistency_loss_cfg}")
-                    self.consistency_loss = ConsistencyFullRNNTLoss(
-                        symmetrical=consistency_loss_cfg.get("symmetrical", True),
-                        reduction=consistency_loss_cfg.get("reduction", "mean_volume"),
-                        use_triton=consistency_loss_cfg.get("use_triton", False),
-                    )
-                else:
-                    logging.info(f"Instantiated partial consistency loss with params: {consistency_loss_cfg}")
-                    self.consistency_loss = ConsistencyRNNTLoss(
-                        blank_id=num_classes,
-                        symmetrical=consistency_loss_cfg.get("symmetrical", True),
-                        use_blank=consistency_loss_cfg.get("use_blank", False),
-                        complete_distribution=consistency_loss_cfg.get("complete_distribution", False),
-                        reduction=consistency_loss_cfg.get("reduction", "mean_volume"),
-                    )
+                self.consistency_loss = ConsistencyRNNTLoss(
+                    symmetrical=consistency_loss_cfg.get("symmetrical", True),
+                    reduction=consistency_loss_cfg.get("reduction", "mean_volume"),
+                    use_triton=consistency_loss_cfg.get("use_triton", False),
+                )
                 self.consistency_loss_weight = weight
                 self.consistency_loss_after_step = consistency_loss_cfg.get("after_step", -1)
             else:

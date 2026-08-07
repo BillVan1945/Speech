@@ -27,7 +27,7 @@ from dataclasses import dataclass
 
 import torch
 
-from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyFullRNNTLoss
+from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
 
 
 @dataclass
@@ -89,7 +89,7 @@ def benchmark_consistency_loss(
     device = torch.device('cuda')
 
     # Create the loss module
-    module = ConsistencyFullRNNTLoss(
+    module = ConsistencyRNNTLoss(
         symmetrical=symmetrical,
         use_triton=use_triton,
         reduction='mean_volume',

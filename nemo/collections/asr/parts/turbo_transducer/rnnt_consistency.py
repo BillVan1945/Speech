@@ -73,7 +73,7 @@ def kl_loss_torch(
     return kl_s_to_t * mask
 
 
-class ConsistencyFullRNNTLoss(nn.Module):
+class ConsistencyRNNTLoss(nn.Module):
     def __init__(
         self,
         symmetrical: bool = True,

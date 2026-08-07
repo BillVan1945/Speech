@@ -15,10 +15,7 @@
 import pytest
 import torch
 
-from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import (
-    ConsistencyFullRNNTLoss,
-    ConsistencyGraphRNNTLoss,
-)
+from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
 from nemo.core.utils.optional_libs import K2_AVAILABLE, TRITON_AVAILABLE
 
 
@@ -40,10 +37,6 @@ DEVICES = get_devices_for_testing(use_cpu_always=False)
 DEVICES_WITH_CPU = get_devices_for_testing(use_cpu_always=True)
 
 
-
-
-
-
 @pytest.mark.unit
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("symmetrical", [True, False])
@@ -51,7 +44,7 @@ DEVICES_WITH_CPU = get_devices_for_testing(use_cpu_always=True)
 def test_consistency_full_loss(device: torch.device, symmetrical: bool, reduction: str):
     """Basic test"""
     torch.manual_seed(42)
-    module = ConsistencyFullRNNTLoss(
+    module = ConsistencyRNNTLoss(
         symmetrical=symmetrical,
         reduction=reduction,
     )
@@ -88,7 +81,7 @@ def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduc
     tgt_lengths = torch.tensor([3, 2, 1], device=device)
 
     def run(use_triton: bool):
-        module = ConsistencyFullRNNTLoss(
+        module = ConsistencyRNNTLoss(
             symmetrical=symmetrical,
             use_triton=use_triton,
             reduction=reduction,
@@ -128,7 +121,6 @@ def test_consistency_full_loss_use_triton_matches_torch(symmetrical: bool, reduc
     assert torch.allclose(
         triton_student_grad, torch_student_grad, atol=3e-4, rtol=2e-3
     ), f"Student grad max diff: {(triton_student_grad - torch_student_grad).abs().max()}"
-
 
 
 # =============================================================================
