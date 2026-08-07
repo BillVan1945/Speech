@@ -21,8 +21,11 @@ import torch
 import nemo.collections.asr.modules.rnnt as rnnt_module
 from nemo.collections.asr.losses.rnnt import RNNTLoss
 from nemo.collections.asr.models.rnnt_models import EncDecRNNTModel
-from nemo.collections.asr.modules.rnnt import RNNTJoint
+from nemo.collections.asr.modules.hybrid_autoregressive_transducer import HATJoint
+from nemo.collections.asr.modules.rnnt import RNNTJoint, SampledRNNTJoint
 from nemo.collections.asr.modules.rnnt_abstract import AbstractRNNTJoint
+from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
+from nemo.collections.asr.parts.turbo_transducer.types import TransducerLossInputs
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 
@@ -133,23 +136,25 @@ def test_joint_passes_live_vocab_projection_parameters(monkeypatch, kernel_type)
 
 
 @pytest.mark.unit
-def test_model_routes_turbo_joint_output_to_loss_logprobs_path():
+def test_model_routes_joint_output_to_loss_logprobs_path():
     target_logprobs = torch.randn(2, 4, 4)
     blank_logprobs = torch.randn(2, 4, 4)
     loss_value = torch.tensor(1.5)
     joint = SimpleNamespace(
         uses_turbo_kernel=True,
-        forward_for_loss=Mock(return_value=(target_logprobs, blank_logprobs)),
+        supports_loss_logprobs=True,
+        forward_for_loss=Mock(return_value=TransducerLossInputs(target_logprobs, blank_logprobs)),
     )
-    loss = SimpleNamespace(forward_from_logprobs=Mock(return_value=loss_value))
-    model = SimpleNamespace(joint=joint, loss=loss)
+    loss = SimpleNamespace(supports_logprobs_input=True, forward_from_logprobs=Mock(return_value=loss_value))
+    model = SimpleNamespace(joint=joint, loss=loss, consistency_loss=None)
+    model.uses_loss_logprobs_path = EncDecRNNTModel.uses_loss_logprobs_path.fget(model)
     encoded = torch.randn(2, 5, 4)
     decoder = torch.randn(2, 6, 4)
     transcript = torch.randint(0, 8, [2, 3])
     source_lengths = torch.tensor([4, 3])
     target_lengths = torch.tensor([3, 2])
 
-    actual_loss, joint_logits = EncDecRNNTModel._compute_rnnt_loss(
+    actual_loss, consistency_loss = EncDecRNNTModel._compute_losses(
         model,
         encoded=encoded,
         decoder=decoder,
@@ -159,13 +164,15 @@ def test_model_routes_turbo_joint_output_to_loss_logprobs_path():
     )
 
     assert actual_loss is loss_value
-    assert joint_logits is None
+    assert consistency_loss is None
     joint.forward_for_loss.assert_called_once_with(
         encoder_outputs=encoded,
         decoder_outputs=decoder,
         encoder_lengths=source_lengths,
         transcripts=transcript,
         transcript_lengths=target_lengths,
+        compute_consistency=False,
+        consistency_symmetrical=True,
     )
     loss.forward_from_logprobs.assert_called_once_with(
         target_logprobs=target_logprobs,
@@ -173,6 +180,49 @@ def test_model_routes_turbo_joint_output_to_loss_logprobs_path():
         input_lengths=source_lengths,
         target_lengths=target_lengths,
     )
+
+
+@pytest.mark.unit
+def test_model_routes_consistency_loss_to_joint():
+    target_logprobs = torch.randn(4, 4, 4)
+    blank_logprobs = torch.randn(4, 4, 4)
+    consistency_kl = torch.randn(2, 4, 4)
+    loss_value = torch.tensor(1.5)
+    consistency_loss_value = torch.tensor(0.25)
+    joint = SimpleNamespace(
+        uses_turbo_kernel=False,
+        supports_loss_logprobs=True,
+        forward_for_loss=Mock(return_value=TransducerLossInputs(target_logprobs, blank_logprobs, consistency_kl)),
+    )
+    loss = SimpleNamespace(supports_logprobs_input=True, forward_from_logprobs=Mock(return_value=loss_value))
+    consistency_loss = SimpleNamespace(symmetrical=False, forward_from_kl=Mock(return_value=consistency_loss_value))
+    model = SimpleNamespace(joint=joint, loss=loss, consistency_loss=consistency_loss)
+    model.uses_loss_logprobs_path = EncDecRNNTModel.uses_loss_logprobs_path.fget(model)
+    encoded = torch.randn(4, 5, 4)
+    decoder = torch.randn(4, 6, 4)
+    transcript = torch.randint(0, 8, [4, 3])
+    source_lengths = torch.tensor([4, 3, 4, 3])
+    target_lengths = torch.tensor([3, 2, 3, 2])
+
+    actual_loss, actual_consistency_loss = EncDecRNNTModel._compute_losses(
+        model,
+        encoded=encoded,
+        decoder=decoder,
+        transcript=transcript,
+        encoded_len=source_lengths,
+        target_length=target_lengths,
+        compute_consistency=True,
+    )
+
+    assert actual_loss is loss_value
+    assert actual_consistency_loss is consistency_loss_value
+    assert joint.forward_for_loss.call_args.kwargs["compute_consistency"] is True
+    assert joint.forward_for_loss.call_args.kwargs["consistency_symmetrical"] is False
+    consistency_call = consistency_loss.forward_from_kl.call_args.kwargs
+    assert consistency_call["consistency_kl"] is consistency_kl
+    # only the teacher (first) half of the lengths is used for the consistency loss
+    assert torch.equal(consistency_call["src_lengths"], source_lengths[:2])
+    assert torch.equal(consistency_call["tgt_lengths"], target_lengths[:2])
 
 
 @pytest.mark.unit
@@ -191,6 +241,35 @@ def test_joint_rejects_incompatible_turbo_configuration():
             jointnet=_jointnet_config(activation="tanh"),
             num_classes=8,
             turbo_kernel=_turbo_kernel_config("fused"),
+        )
+
+
+@pytest.mark.unit
+def test_joints_declare_support_for_loss_logprobs():
+    assert not _PlainJoint().supports_loss_logprobs
+    assert RNNTJoint(jointnet=_jointnet_config(), num_classes=8).supports_loss_logprobs
+    # both subclasses require the full logits path
+    assert not SampledRNNTJoint(jointnet=_jointnet_config(), num_classes=8, n_samples=4).supports_loss_logprobs
+    assert not HATJoint(jointnet=_jointnet_config(), num_classes=8).supports_loss_logprobs
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kernel_type", ["fused_vocab", "fused"])
+def test_turbo_joint_rejects_consistency_loss(kernel_type):
+    joint = RNNTJoint(
+        jointnet=_jointnet_config(),
+        num_classes=8,
+        log_softmax=False,
+        turbo_kernel=_turbo_kernel_config(kernel_type),
+    )
+    with pytest.raises(NotImplementedError, match="Consistency loss"):
+        joint.forward_for_loss(
+            encoder_outputs=torch.randn(2, 5, 4),
+            decoder_outputs=torch.randn(2, 6, 4),
+            encoder_lengths=torch.tensor([4, 4]),
+            transcripts=torch.randint(0, 8, [2, 3]),
+            transcript_lengths=torch.tensor([3, 3]),
+            compute_consistency=True,
         )
 
 
@@ -256,16 +335,17 @@ def test_joint_and_loss_integration_matches_standard(kernel_type):
         input_lengths=source_lengths,
         target_lengths=target_lengths,
     )
-    target_logprobs, blank_logprobs = optimized_joint.forward_for_loss(
+    loss_inputs = optimized_joint.forward_for_loss(
         encoder_outputs=optimized_encoder,
         decoder_outputs=optimized_decoder,
         encoder_lengths=source_lengths,
         transcripts=targets,
         transcript_lengths=target_lengths,
     )
+    assert loss_inputs.consistency_kl is None
     optimized_loss_value = optimized_loss.forward_from_logprobs(
-        target_logprobs=target_logprobs,
-        blank_logprobs=blank_logprobs,
+        target_logprobs=loss_inputs.target_logprobs,
+        blank_logprobs=loss_inputs.blank_logprobs,
         input_lengths=source_lengths,
         target_lengths=target_lengths,
     )
@@ -290,3 +370,82 @@ def test_joint_and_loss_integration_matches_standard(kernel_type):
 
     assert optimized_joint.joint_net[-1].weight.grad is not None
     assert optimized_joint.joint_net[-1].bias.grad is not None
+
+
+@pytest.mark.unit
+@pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("symmetrical", [True, False])
+@pytest.mark.parametrize("reduction", ["mean", "mean_volume"])
+def test_joint_with_consistency_matches_separate_losses(symmetrical, reduction):
+    """The fused (single gradient buffer) path must match the reference: full logits + two separate losses."""
+    torch.manual_seed(42)
+    device = torch.device("cuda")
+    num_classes = 8
+    consistency_weight = 0.3
+    half_batch_size = 2
+
+    reference_joint = RNNTJoint(jointnet=_jointnet_config(), num_classes=num_classes, log_softmax=False).to(device)
+    fused_joint = RNNTJoint(jointnet=_jointnet_config(), num_classes=num_classes, log_softmax=False).to(device)
+    fused_joint.load_state_dict(reference_joint.state_dict(), strict=True)
+
+    reference_encoder = torch.randn(2 * half_batch_size, 5, 4, device=device, requires_grad=True)
+    reference_decoder = torch.randn(2 * half_batch_size, 6, 4, device=device, requires_grad=True)
+    fused_encoder = reference_encoder.detach().clone().requires_grad_(True)
+    fused_decoder = reference_decoder.detach().clone().requires_grad_(True)
+    targets = torch.randint(0, num_classes, [half_batch_size, 3], device=device).repeat(2, 1)
+    source_lengths = torch.tensor([4, 3], device=device).repeat(2)
+    target_lengths = torch.tensor([3, 2], device=device).repeat(2)
+
+    rnnt_loss = RNNTLoss(
+        num_classes=num_classes, reduction="mean_volume", loss_name="turbo_rnnt", loss_kwargs={"backend": "triton"}
+    )
+    consistency_loss = ConsistencyRNNTLoss(symmetrical=symmetrical, reduction=reduction, backend="triton")
+
+    # reference: full logits, two independent losses
+    reference_logits = reference_joint(encoder_outputs=reference_encoder, decoder_outputs=reference_decoder)
+    reference_rnnt_loss_value = rnnt_loss(
+        log_probs=reference_logits, targets=targets, input_lengths=source_lengths, target_lengths=target_lengths
+    )
+    reference_consistency_value = consistency_loss(
+        teacher_logits=reference_logits[:half_batch_size],
+        student_logits=reference_logits[half_batch_size:],
+        src_lengths=source_lengths[:half_batch_size],
+        tgt_lengths=target_lengths[:half_batch_size],
+    )
+    (reference_rnnt_loss_value + consistency_weight * reference_consistency_value).backward()
+
+    # fused: per-position quantities, one gradient buffer
+    loss_inputs = fused_joint.forward_for_loss(
+        encoder_outputs=fused_encoder,
+        decoder_outputs=fused_decoder,
+        encoder_lengths=source_lengths,
+        transcripts=targets,
+        transcript_lengths=target_lengths,
+        compute_consistency=True,
+        consistency_symmetrical=symmetrical,
+    )
+    # [B, T, U+1]; encoder/decoder outputs above are [B, D, T] and [B, D, U+1]
+    assert loss_inputs.consistency_kl.shape == (half_batch_size, 4, 4)
+    fused_rnnt_loss_value = rnnt_loss.forward_from_logprobs(
+        target_logprobs=loss_inputs.target_logprobs,
+        blank_logprobs=loss_inputs.blank_logprobs,
+        input_lengths=source_lengths,
+        target_lengths=target_lengths,
+    )
+    fused_consistency_value = consistency_loss.forward_from_kl(
+        consistency_kl=loss_inputs.consistency_kl,
+        src_lengths=source_lengths[:half_batch_size],
+        tgt_lengths=target_lengths[:half_batch_size],
+    )
+    (fused_rnnt_loss_value + consistency_weight * fused_consistency_value).backward()
+
+    assert torch.allclose(fused_rnnt_loss_value, reference_rnnt_loss_value, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(fused_consistency_value, reference_consistency_value, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(fused_encoder.grad, reference_encoder.grad, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(fused_decoder.grad, reference_decoder.grad, atol=1e-5, rtol=1e-5)
+    fused_parameters = dict(fused_joint.named_parameters())
+    for parameter_name, reference_parameter in reference_joint.named_parameters():
+        fused_parameter = fused_parameters[parameter_name]
+        assert reference_parameter.grad is not None, parameter_name
+        assert torch.allclose(fused_parameter.grad, reference_parameter.grad, atol=1e-5, rtol=1e-5), parameter_name

@@ -17,6 +17,7 @@ import torch
 
 from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.collections.asr.parts.turbo_transducer.rnnt_consistency import ConsistencyRNNTLoss
+from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import get_rnnt_mask
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 
 
@@ -832,3 +833,34 @@ class TestFusedSymmetricKLDivTriton:
             loss = kl_loss_triton(t, s, mask, symmetrical=True).sum()
             loss.backward()
         # Test passes if no exception is raised
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("device", DEVICES_WITH_CPU)
+@pytest.mark.parametrize("reduction", ["mean_volume", "mean"])
+def test_consistency_forward_from_kl_matches_masked_reduction(device: torch.device, reduction: str):
+    """`forward_from_kl` must reproduce the reduction used by the full `forward` (mask-based denominators)."""
+    torch.manual_seed(11)
+    module = ConsistencyRNNTLoss(reduction=reduction)
+
+    batch_size, src_length_max, tgt_length_max_plus_1 = 3, 5, 4
+    src_lengths = torch.tensor([5, 3, 4], device=device)
+    # NB: includes an empty target sequence
+    tgt_lengths = torch.tensor([3, 0, 1], device=device)
+    _, mask = get_rnnt_mask(
+        batch_size=batch_size,
+        src_length_max=src_length_max,
+        tgt_length_max_plus_1=tgt_length_max_plus_1,
+        device=device,
+        src_lengths=src_lengths,
+        tgt_lengths=tgt_lengths,
+    )
+    consistency_kl = torch.rand([batch_size, src_length_max, tgt_length_max_plus_1], device=device) * mask
+
+    if reduction == "mean":
+        expected = consistency_kl.sum() / mask.sum().clamp(min=1)
+    else:
+        expected = (consistency_kl.sum(dim=(1, 2)) / mask.sum(dim=(1, 2)).clamp(min=1)).mean()
+
+    actual = module.forward_from_kl(consistency_kl=consistency_kl, src_lengths=src_lengths, tgt_lengths=tgt_lengths)
+    assert torch.allclose(actual, expected, atol=1e-6)

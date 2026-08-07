@@ -100,7 +100,14 @@ def _kl_div_bwd_kernel(
     BLOCK_SIZE: tl.constexpr,
     USE_FP64: tl.constexpr,
     SYMMETRIC: tl.constexpr,
+    ACCUMULATE: tl.constexpr,
 ):
+    """
+    Backward kernel for KL divergence loss.
+
+    When ACCUMULATE is True, gradients are added to the values already stored in the output tensors
+    (used when the output buffer is shared with another loss); otherwise the values are overwritten.
+    """
     batch_i = tl.program_id(axis=0).to(tl.int64)
     source_i = tl.program_id(axis=1).to(tl.int64)
     target_i = tl.program_id(axis=2).to(tl.int64)
@@ -141,12 +148,17 @@ def _kl_div_bwd_kernel(
         # symmetric: student_grad = 0.5 * upstream * (Q - P), teacher_grad = -student_grad
         student_grad = 0.5 * upstream_grad * prob_diff
         teacher_grad_out_ptr += idx_vocab_start
-        tl.store(teacher_grad_out_ptr + col_offsets, -student_grad, mask=mask)
+        teacher_grad = -student_grad
+        if ACCUMULATE:
+            teacher_grad += tl.load(teacher_grad_out_ptr + col_offsets, mask=mask, other=0.0).to(compute_dtype)
+        tl.store(teacher_grad_out_ptr + col_offsets, teacher_grad, mask=mask)
     else:
         # non-symmetric: student_grad = upstream * (Q - P), no teacher gradient
         student_grad = upstream_grad * prob_diff
 
     student_grad_out_ptr += idx_vocab_start
+    if ACCUMULATE:
+        student_grad += tl.load(student_grad_out_ptr + col_offsets, mask=mask, other=0.0).to(compute_dtype)
     tl.store(student_grad_out_ptr + col_offsets, student_grad, mask=mask)
 
 
@@ -235,6 +247,7 @@ class FusedKLDivTriton(torch.autograd.Function):
             BLOCK_SIZE=triton.next_power_of_2(teacher_logits.shape[-1]),
             USE_FP64=use_fp64,
             SYMMETRIC=symmetric,
+            ACCUMULATE=False,
         )
 
         if symmetric:

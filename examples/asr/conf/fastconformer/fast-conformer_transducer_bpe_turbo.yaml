@@ -242,13 +242,18 @@ model:
       fastemit_lambda: 0.0  # Recommended values to be in range [1e-4, 1e-2], 0.001 is a good start.
       clamp: -1.0  # if > 0, applies gradient clamping in range [-clamp, clamp] for the joint tensor only.
 
+    # Consistency (KL) regularization between two augmented passes over the same batch.
+    # NB: enabling it doubles the batch (each utterance is processed twice).
+    # With `loss_name: turbo_rnnt` the consistency loss is fused with the log-probs extraction from the
+    # Joint output, so both losses share a single gradient buffer (much lower memory in the backward pass).
+    # NB: incompatible with `joint.fuse_loss_wer` and (not yet supported) with `joint.turbo_kernel`.
     consistency:
       weight: 0.0  # 0.2
       symmetrical: true
       reduction: mean_volume
       after_step: -1
       force_double_batch: false  # if weight is not None/0.0, still use double batch
-      backend: triton
+      backend: triton  # only used when the losses are not fused (e.g. `loss_name: warprnnt_numba`)
 
   optim:
     name: adamw

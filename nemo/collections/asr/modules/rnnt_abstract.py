@@ -32,6 +32,14 @@ class AbstractRNNTJoint(NeuralModule, ABC):
         """Whether this Joint uses an optimized training-only kernel."""
         return False
 
+    @property
+    def supports_loss_logprobs(self) -> bool:
+        """
+        Whether this Joint implements `forward_for_loss`, i.e. can produce target/blank log-probabilities
+        (and, optionally, the consistency loss) directly instead of the full logits tensor.
+        """
+        return False
+
     @abstractmethod
     def joint_after_projection(self, f: torch.Tensor, g: torch.Tensor) -> Any:
         """
