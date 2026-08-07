@@ -31,6 +31,7 @@ class TurboRnntLoss(nn.Module):
         self,
         blank: int,
         fastemit_lambda: float = 0.0,
+        clamp: float = -1.0,
         mask_non_finite: bool = False,
         warn_non_finite: bool = False,
         backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
@@ -47,6 +48,9 @@ class TurboRnntLoss(nn.Module):
         super().__init__()
         self.blank = blank
         self.fastemit_lambda = fastemit_lambda
+        self.clamp = float(clamp) if clamp > 0 else 0.0
+        if self.clamp > 0:
+            raise NotImplementedError("Triton loss does not yet support clamping")
         self.reduction = None
         self.mask_non_finite = mask_non_finite
         self.warn_non_finite = warn_non_finite

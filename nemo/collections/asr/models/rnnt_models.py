@@ -104,7 +104,7 @@ class EncDecRNNTModel(ASRModel, ASRModuleMixin, ExportableEncDecModel, ASRTransc
                 self.consistency_loss = ConsistencyRNNTLoss(
                     symmetrical=consistency_loss_cfg.get("symmetrical", True),
                     reduction=consistency_loss_cfg.get("reduction", "mean_volume"),
-                    use_triton=consistency_loss_cfg.get("use_triton", False),
+                    backend=consistency_loss_cfg.get("backend", None),
                 )
                 self.consistency_loss_weight = weight
                 self.consistency_loss_after_step = consistency_loss_cfg.get("after_step", -1)

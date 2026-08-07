@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from nemo.collections.asr.parts.turbo_transducer.backend import TurboTransducerBackend
 from nemo.collections.asr.parts.turbo_transducer.rnnt_logprobs import get_rnnt_mask
 from nemo.core.utils.optional_libs import TRITON_AVAILABLE
 from nemo.utils.enum import PrettyStrEnum
@@ -77,14 +78,16 @@ class ConsistencyRNNTLoss(nn.Module):
     def __init__(
         self,
         symmetrical: bool = True,
-        use_triton: bool | None = None,  # None -> auto
         reduction: str | ConsistencyRNNTReductionType = 'mean_volume',
         blank_id: int | None = None,
+        backend: str | TurboTransducerBackend | None = None,
     ):
         super().__init__()
         self.reduction = ConsistencyRNNTReductionType(reduction)
         self.symmetrical = symmetrical
-        self.use_triton = TRITON_AVAILABLE if use_triton is None else use_triton
+        self.backend = TurboTransducerBackend(backend) if backend is not None else TurboTransducerBackend.TRITON
+        if self.backend is not TurboTransducerBackend.TRITON:
+            raise NotImplementedError("Only Triton backend is now supported")
         self.blank_id = blank_id
 
     def forward(
@@ -113,7 +116,7 @@ class ConsistencyRNNTLoss(nn.Module):
         )
         mask = mask_blank
 
-        if self.use_triton and device.type == "cuda":
+        if self.backend is TurboTransducerBackend.TRITON:
             kl_loss = kl_loss_triton(
                 teacher_logits=teacher_logits,
                 student_logits=student_logits,
