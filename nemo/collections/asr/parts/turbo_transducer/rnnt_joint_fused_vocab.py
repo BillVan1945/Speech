@@ -76,6 +76,8 @@ def rnnt_joint_fused_vocab(
                 bias=bias,
                 blank_id=blank_id,
                 use_high_precision_mm=use_high_precision_mm,
+                input_grad_full_precision=input_grad_full_precision,
+                weight_grad_full_precision=weight_grad_full_precision,
             )
         case _:
             raise Exception("Not implemented backend")

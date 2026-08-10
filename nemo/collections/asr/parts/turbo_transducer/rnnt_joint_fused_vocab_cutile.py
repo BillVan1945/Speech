@@ -14,12 +14,24 @@
 
 import cuda.tile as ct
 import torch
-from nemo.collections.asr.parts.turbo_transducer.utils_cutile import swizzle_2d_as_triton
 
 ConstInt = ct.Constant[int]
+ConstBool = ct.Constant[bool]
+
+# Expected active CTAs per SM. cuTile exposes no num_warps/num_stages knob, so this is the main pressure dial.
+# Tuned on sm_120: 2 is ~8% faster than the compiler default, 1 is ~33% slower and 4 is catastrophic (5x).
+# See tune_rnnt_joint_fused_vocab_cutile.py.
+_OCCUPANCY = 2
 
 
-@ct.kernel
+def _matmul_dtype(array_dtype, use_high_precision_mm: bool):
+    """Mirror the Triton kernel's ``matmul_dtype`` rule: keep bfloat16 operands unless high precision is requested."""
+    if use_high_precision_mm:
+        return ct.float32
+    return array_dtype
+
+
+@ct.kernel(occupancy=_OCCUPANCY)
 def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     joint_hidden_2d,
     targets_flat,
@@ -40,7 +52,10 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     FLATTENED_BATCH_BLOCK: ConstInt,
     HIDDEN_BLOCK: ConstInt,
     VOCAB_BLOCK: ConstInt,
+    USE_HIGH_PRECISION_MM: ConstBool,
 ):
+    matmul_dtype = _matmul_dtype(weight.dtype, USE_HIGH_PRECISION_MM)
+
     flattened_batch_block_index = ct.bid(0)
     flattened_batch_start = flattened_batch_block_index * FLATTENED_BATCH_BLOCK
     flattened_batch_offsets = flattened_batch_start + ct.arange(FLATTENED_BATCH_BLOCK, dtype=ct.int32)
@@ -88,8 +103,12 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
 
         for hidden_block_index in range(num_hidden_blocks):
             hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
-            weight_tile_t = ct.transpose(weight_tv.load((vocab_block_index, hidden_block_index)))
-            block_logits = ct.mma(hidden_tile, weight_tile_t, block_logits)
+            weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
+            block_logits = ct.mma(
+                ct.astype(hidden_tile, matmul_dtype),
+                ct.transpose(ct.astype(weight_tile, matmul_dtype)),
+                block_logits,
+            )
 
         block_logits = ct.where(vocab_mask[None, :], block_logits, float("-inf"))
 
@@ -110,7 +129,7 @@ def _rnnt_joint_fused_vocab_fwd_cutile_kernel(
     ct.store(log_sum_exp_out, index=flattened_batch_block_index, tile=log_sum_exp_score * output_blank_mask)
 
 
-@ct.kernel
+@ct.kernel(occupancy=_OCCUPANCY)
 def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     joint_hidden_2d,
     targets_flat,
@@ -134,13 +153,17 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     FLATTENED_BATCH_BLOCK: ConstInt,
     HIDDEN_BLOCK: ConstInt,
     VOCAB_BLOCK: ConstInt,
-    GROUP_SIZE: ConstInt,
+    USE_HIGH_PRECISION_MM: ConstBool,
 ):
-    # vocab_block_index = ct.bid(0)
-    # flattened_batch_block_index = ct.bid(1)
-    flattened_batch_block_index, vocab_block_index = swizzle_2d_as_triton(
-        ct.bid(0), ct.bid(1), ct.num_blocks(0), ct.num_blocks(1), GROUP_SIZE
-    )
+    matmul_dtype = _matmul_dtype(weight.dtype, USE_HIGH_PRECISION_MM)
+
+    # 1-D grid, decomposed so that all vocab blocks of one flattened-batch tile run on consecutive CTAs. That keeps
+    # the tile's grad_joint_hidden rows resident in L2 across the whole vocab sweep (see the Triton twin, which
+    # remaps its 2-D grid to the same order).
+    num_vocab_blocks = ct.cdiv(vocab_size, VOCAB_BLOCK)
+    linear_block_index = ct.bid(0)
+    flattened_batch_block_index = linear_block_index // num_vocab_blocks
+    vocab_block_index = linear_block_index - flattened_batch_block_index * num_vocab_blocks
 
     vocab_offsets = vocab_block_index * VOCAB_BLOCK + ct.arange(VOCAB_BLOCK, dtype=ct.int32)
     vocab_mask = vocab_offsets < vocab_size
@@ -154,9 +177,11 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     joint_hidden_2d_tv = joint_hidden_2d.tiled_view(
         (FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), padding_mode=ct.PaddingMode.ZERO
     )
+    grad_joint_hidden_2d_tv = grad_joint_hidden_2d.tiled_view((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK))
+    grad_weight_tv = grad_weight.tiled_view((VOCAB_BLOCK, HIDDEN_BLOCK))
+    grad_bias_tv = grad_bias.tiled_view((VOCAB_BLOCK,))
 
     bias_chunk = ct.astype(bias_tv.load((vocab_block_index,)), ct.float32)
-    grad_bias_acc = ct.zeros((VOCAB_BLOCK,), dtype=ct.float32)
 
     flattened_batch_start = flattened_batch_block_index * FLATTENED_BATCH_BLOCK
     flattened_batch_offsets = flattened_batch_start + ct.arange(FLATTENED_BATCH_BLOCK, dtype=ct.int32)
@@ -198,7 +223,11 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
     for hidden_block_index in range(num_hidden_blocks):
         hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
         weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
-        logits_block = ct.mma(hidden_tile, ct.transpose(weight_tile), logits_block)
+        logits_block = ct.mma(
+            ct.astype(hidden_tile, matmul_dtype),
+            ct.transpose(ct.astype(weight_tile, matmul_dtype)),
+            logits_block,
+        )
 
     # Softmax gradient.
     probabilities_block = ct.exp(logits_block - lse[:, None])
@@ -208,47 +237,49 @@ def _rnnt_joint_fused_vocab_bwd_cutile_kernel(
         + (grad_target[:, None] * (vocab_offsets[None, :] == targets_row[:, None]))
     )
     grad_logits_block = ct.where(output_blank_mask[:, None] & vocab_mask[None, :], grad_logits_block, 0.0)
-    grad_bias_acc += ct.sum(grad_logits_block, axis=0)
+    grad_bias_acc = ct.sum(grad_logits_block, axis=0)
 
-    # Cast grad_logits to weight dtype for the backward matmuls (matches Triton's matmul_dtype when not high precision).
-    grad_logits_for_mm = ct.astype(grad_logits_block, weight.dtype)
+    grad_logits_for_mm = ct.astype(grad_logits_block, matmul_dtype)
 
-    for r_hidden_block_index in range(num_hidden_blocks):
-        hidden_block_index = num_hidden_blocks - r_hidden_block_index - 1
-        hidden_offsets = hidden_block_index * HIDDEN_BLOCK + ct.arange(HIDDEN_BLOCK, dtype=ct.int32)
-        weight_tile = weight_tv.load((vocab_block_index, hidden_block_index))
-
-        grad_hidden_delta = ct.matmul(grad_logits_for_mm, weight_tile)
-        ct.atomic_add(
-            grad_joint_hidden_2d,
-            (flattened_batch_offsets[:, None], hidden_offsets[None, :]),
-            grad_hidden_delta,
-            memory_order=ct.MemoryOrder.RELAXED,
+    # Reverse iteration over the hidden dim so the tail of the logits loop is still cache-hot.
+    for reverse_hidden_index in range(num_hidden_blocks):
+        hidden_block_index = num_hidden_blocks - reverse_hidden_index - 1
+        weight_tile = ct.astype(weight_tv.load((vocab_block_index, hidden_block_index)), matmul_dtype)
+        grad_hidden_delta = ct.mma(
+            grad_logits_for_mm,
+            weight_tile,
+            ct.zeros((FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
+        )
+        # Atomic: every vocab block contributes to the same joint_hidden rows.
+        grad_joint_hidden_2d_tv.atomic_store_add(
+            (flattened_batch_block_index, hidden_block_index),
+            ct.astype(grad_hidden_delta, grad_joint_hidden_2d.dtype),
         )
 
     grad_logits_for_mm_t = ct.transpose(grad_logits_for_mm)
-    for r_hidden_block_index in range(num_hidden_blocks):
-        hidden_block_index = num_hidden_blocks - r_hidden_block_index - 1
-        hidden_offsets = hidden_block_index * HIDDEN_BLOCK + ct.arange(HIDDEN_BLOCK, dtype=ct.int32)
-        hidden_tile = joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index))
-        grad_weight_delta = ct.matmul(grad_logits_for_mm_t, hidden_tile)
-        ct.atomic_add(
-            grad_weight,
-            (vocab_offsets[:, None], hidden_offsets[None, :]),
-            grad_weight_delta,
-            memory_order=ct.MemoryOrder.RELAXED,
+    for reverse_hidden_index in range(num_hidden_blocks):
+        hidden_block_index = num_hidden_blocks - reverse_hidden_index - 1
+        hidden_tile = ct.astype(
+            joint_hidden_2d_tv.load((flattened_batch_block_index, hidden_block_index)), matmul_dtype
+        )
+        grad_weight_delta = ct.mma(
+            grad_logits_for_mm_t,
+            hidden_tile,
+            ct.zeros((VOCAB_BLOCK, HIDDEN_BLOCK), dtype=ct.float32),
+        )
+        # Atomic: every flattened-batch block contributes to the same weight rows.
+        grad_weight_tv.atomic_store_add(
+            (vocab_block_index, hidden_block_index), ct.astype(grad_weight_delta, grad_weight.dtype)
         )
 
-    ct.atomic_add(grad_bias, vocab_offsets, grad_bias_acc, memory_order=ct.MemoryOrder.RELAXED)
+    grad_bias_tv.atomic_store_add((vocab_block_index,), ct.astype(grad_bias_acc, grad_bias.dtype))
 
 
-_FORWARD_FLATTENED_BATCH_BLOCK = 64
-_FORWARD_HIDDEN_BLOCK = 32
-_FORWARD_VOCAB_BLOCK = 128
-
-_BACKWARD_FLATTENED_BATCH_BLOCK = 128
-_BACKWARD_HIDDEN_BLOCK = 32
-_BACKWARD_VOCAB_BLOCK = 128
+# (FLATTENED_BATCH_BLOCK, HIDDEN_BLOCK, VOCAB_BLOCK), tuned on sm_120 for vocab_size in {1025, 8193};
+# both sizes pick the same shape. FLATTENED_BATCH_BLOCK also sets how many atomic accumulations land in each
+# grad_weight element, so keep it at 128 to match the Triton backend's gradient accuracy, not just its speed.
+_FORWARD_CONFIG = (128, 32, 128)
+_BACKWARD_CONFIG = (128, 32, 128)
 
 
 class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
@@ -263,9 +294,9 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         bias: torch.Tensor,
         blank_id: int,
         use_high_precision_mm: bool = False,
+        input_grad_full_precision: bool = False,
+        weight_grad_full_precision: bool = False,
     ):
-        del use_high_precision_mm  # accepted for API parity; not yet used by cuTile path
-
         batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim = joint_hidden.shape
         flattened_batch_size = batch_size * src_max_length * tgt_max_length_plus_1
         max_target_len = tgt_max_length_plus_1 - 1
@@ -289,9 +320,8 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         blank_logprobs = torch.zeros_like(target_logprobs)
         log_sum_exp_scores = torch.empty_like(target_logprobs)
 
-        flattened_batch_blocks = (
-            flattened_batch_size + _FORWARD_FLATTENED_BATCH_BLOCK - 1
-        ) // _FORWARD_FLATTENED_BATCH_BLOCK
+        flattened_batch_block, hidden_block, vocab_block = _FORWARD_CONFIG
+        flattened_batch_blocks = (flattened_batch_size + flattened_batch_block - 1) // flattened_batch_block
 
         ct.launch(
             torch.cuda.current_stream(),
@@ -314,9 +344,10 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
                 hidden_dim,
                 vocab_size,
                 blank_id,
-                _FORWARD_FLATTENED_BATCH_BLOCK,
-                _FORWARD_HIDDEN_BLOCK,
-                _FORWARD_VOCAB_BLOCK,
+                flattened_batch_block,
+                hidden_block,
+                vocab_block,
+                use_high_precision_mm,
             ),
         )
 
@@ -324,6 +355,9 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         ctx.blank_id = blank_id
         ctx.src_max_length = src_max_length
         ctx.tgt_max_length_plus_1 = tgt_max_length_plus_1
+        ctx.use_high_precision_mm = use_high_precision_mm
+        ctx.input_grad_full_precision = input_grad_full_precision
+        ctx.weight_grad_full_precision = weight_grad_full_precision
         return target_logprobs, blank_logprobs
 
     @staticmethod
@@ -340,6 +374,13 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         blank_id = ctx.blank_id
         src_max_length = ctx.src_max_length
         tgt_max_length_plus_1 = ctx.tgt_max_length_plus_1
+        use_high_precision_mm = ctx.use_high_precision_mm
+        input_grad_full_precision = ctx.input_grad_full_precision
+        if input_grad_full_precision is None:
+            input_grad_full_precision = use_high_precision_mm
+        weight_grad_full_precision = ctx.weight_grad_full_precision
+        if weight_grad_full_precision is None:
+            weight_grad_full_precision = use_high_precision_mm
 
         grad_target_scores = grad_target_scores.contiguous()
         grad_blank_scores = grad_blank_scores.contiguous()
@@ -351,17 +392,27 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         device = joint_hidden.device
         float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
 
-        # Accumulate gradients in fp32; cast back to input dtypes on exit.
-        grad_joint_hidden = torch.zeros([flattened_batch_size, hidden_dim], dtype=float_dtype, device=device)
-        grad_weight = torch.zeros([vocab_size, hidden_dim], dtype=float_dtype, device=device)
-        grad_bias = torch.zeros([vocab_size], dtype=float_dtype, device=device)
+        grad_joint_hidden = torch.zeros(
+            [flattened_batch_size, hidden_dim],
+            dtype=float_dtype if input_grad_full_precision else joint_hidden.dtype,
+            device=device,
+        )
+        grad_weight = torch.zeros(
+            [vocab_size, hidden_dim],
+            dtype=float_dtype if weight_grad_full_precision else weight.dtype,
+            device=device,
+        )
+        grad_bias = torch.zeros(
+            [vocab_size], dtype=float_dtype if weight_grad_full_precision else bias.dtype, device=device
+        )
 
-        batch_blocks = (flattened_batch_size + _BACKWARD_FLATTENED_BATCH_BLOCK) // _BACKWARD_FLATTENED_BATCH_BLOCK
-        vocab_blocks = (vocab_size + _BACKWARD_VOCAB_BLOCK - 1) // _BACKWARD_VOCAB_BLOCK
+        flattened_batch_block, hidden_block, vocab_block = _BACKWARD_CONFIG
+        batch_blocks = (flattened_batch_size + flattened_batch_block - 1) // flattened_batch_block
+        vocab_blocks = (vocab_size + vocab_block - 1) // vocab_block
 
         ct.launch(
             torch.cuda.current_stream(),
-            (batch_blocks, vocab_blocks, 1),
+            (batch_blocks * vocab_blocks, 1, 1),
             _rnnt_joint_fused_vocab_bwd_cutile_kernel,
             (
                 joint_hidden.view(flattened_batch_size, hidden_dim),
@@ -383,10 +434,10 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
                 hidden_dim,
                 vocab_size,
                 blank_id,
-                _BACKWARD_FLATTENED_BATCH_BLOCK,
-                _BACKWARD_HIDDEN_BLOCK,
-                _BACKWARD_VOCAB_BLOCK,
-                64,
+                flattened_batch_block,
+                hidden_block,
+                vocab_block,
+                use_high_precision_mm,
             ),
         )
 
@@ -395,7 +446,7 @@ class _RnntJointFusedVocabCuTileFunction(torch.autograd.Function):
         grad_weight = grad_weight.to(weight.dtype)
         grad_bias = grad_bias.to(bias.dtype)
 
-        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None
+        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None
 
 
 def rnnt_joint_fused_vocab_cutile(
@@ -407,6 +458,8 @@ def rnnt_joint_fused_vocab_cutile(
     bias: torch.Tensor,
     blank_id: int,
     use_high_precision_mm: bool = False,
+    input_grad_full_precision: bool = False,
+    weight_grad_full_precision: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntJointFusedVocabCuTileFunction.apply(
         joint_hidden,
@@ -417,5 +470,7 @@ def rnnt_joint_fused_vocab_cutile(
         bias,
         blank_id,
         use_high_precision_mm,
+        input_grad_full_precision,
+        weight_grad_full_precision,
     )
     return target_logprobs, blank_logprobs

@@ -52,10 +52,10 @@ VOCAB_SIZES: list[int] = [
 # vocab group in the printed/CSV output.
 EXPERIMENTS: list[tuple[str, str, str]] = [
     # ("standard", "-", "warprnnt_numba"),
-    ("standard", "-", "turbo_rnnt"),
+    # ("standard", "-", "turbo_rnnt"),
     ("fused_vocab", "triton", "turbo_rnnt"),
-    # ("fused_vocab", "cutile", "turbo_rnnt"),  # slow backward
-    ("fused", "triton", "turbo_rnnt"),
+    ("fused_vocab", "cutile", "turbo_rnnt"),
+    # ("fused", "triton", "turbo_rnnt"),
     # ("fused", "cutile", "turbo_rnnt"),  # not yet implemented
 ]
 
