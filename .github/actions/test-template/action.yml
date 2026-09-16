@@ -1,4 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -56,6 +57,14 @@ inputs:
     description: "Directory under tests/ containing the test scripts"
     required: false
     default: "functional_tests"
+  download-artifact-name:
+    description: "Optional workflow artifact to place in the test checkout"
+    required: false
+    default: ""
+  download-artifact-path:
+    description: "Destination path relative to the test checkout"
+    required: false
+    default: ".ci-artifacts"
 runs:
   using: "composite"
   steps:
@@ -92,6 +101,14 @@ runs:
       with:
         path: ${{ github.run_id }}/${{steps.uuid.outputs.id }}/NeMo
 
+    - name: Download input artifact
+      if: ${{ inputs.download-artifact-name != '' }}
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ inputs.download-artifact-name }}
+        path: >-
+          ${{ github.run_id }}/${{ steps.uuid.outputs.id }}/NeMo/${{ inputs.download-artifact-path }}
+
     - name: Start container
       shell: bash
       env:
@@ -120,7 +137,9 @@ runs:
           -d \
           --name nemo_container_${{ github.run_id }}_${{ inputs.runner }} ${ARG[@]} \
           --shm-size=64g \
-          --env TRANSFORMERS_OFFLINE=0 \
+          --env HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}" \
+          --env HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-0}" \
+          --env TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-0}" \
           --env NEMO_HOME="/home/TestData/nemo_home" \
           --env HYDRA_FULL_ERROR=1 \
           --env HF_HOME=/home/TestData/HF_HOME \

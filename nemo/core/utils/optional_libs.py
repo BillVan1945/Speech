@@ -1,4 +1,5 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES.  All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -36,6 +37,9 @@ __all__ = [
     # numba-cuda
     "NUMBA_CUDA_AVAILABLE",
     "numba_cuda_required",
+    # graphviz
+    "GRAPHVIZ_AVAILABLE",
+    "graphviz_required",
     # cuTile
     "CUTILE_AVAILABLE",
 ]
@@ -95,6 +99,9 @@ except (ImportError, ModuleNotFoundError):
 
 CUDA_PYTHON_INSTALLATION_MESSAGE = "Try installing cuda-python with `pip install cuda-python>=12.6.0`"
 
+GRAPHVIZ_AVAILABLE = is_lib_available("graphviz")
+GRAPHVIZ_INSTALLATION_MESSAGE = "Try installing graphviz with `sudo apt install graphviz && pip install graphviz`"
+
 try:
     import cuda.tile as _  # noqa: F401
 
@@ -144,4 +151,7 @@ cuda_python_required = _lib_required(
 numba_required = _lib_required(is_available=NUMBA_AVAILABLE, name="numba", message=NUMBA_INSTALLATION_MESSAGE)
 numba_cuda_required = _lib_required(
     is_available=NUMBA_CUDA_AVAILABLE, name="numba-cuda", message=NUMBA_CUDA_INSTALLATION_MESSAGE
+)
+graphviz_required = _lib_required(
+    is_available=GRAPHVIZ_AVAILABLE, name="graphviz", message=GRAPHVIZ_INSTALLATION_MESSAGE
 )
