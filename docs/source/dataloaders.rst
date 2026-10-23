@@ -976,8 +976,12 @@ The following ``input_cfg`` types accept ``indexed: true`` today and require an
   lhotse-speech/lhotse#1598 (``LazyIndexedSharIterator(lazy=)`` plus
   ``IndexedTarReader.read_metadata``): 2.0.0a6 accepts ``lazy=`` but its lazy
   mode fails on fields that have no placeholder in the cuts, such as codes tars
-  appended to existing shards, or fields a cut lacks. Incompatible with
-  ``slice_length``.
+  appended to existing shards, or fields a cut lacks. The lazy reader must also
+  take each field's manifest from the tar, as the eager and streaming readers do;
+  the lhotse#1598 head still keeps the manifest the cuts carry, which fails when
+  that manifest is stale (for example resample transforms of the original source
+  over already resampled tar bytes), so lazy mode needs the fix proposed for that
+  PR. Incompatible with ``slice_length``.
   The payload mode is part of the saved dataloader state, so a resumed run keeps
   the mode it was checkpointed with.
 * ``parquet`` — no sidecar required, but the file must expose row-group

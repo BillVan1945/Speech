@@ -3,6 +3,7 @@
 
 """Opt-in Lhotse Shar lazy-payload mode (``shar_lazy_payloads``) through NeMo's dataloader."""
 
+import inspect
 import io
 from pathlib import Path
 
@@ -14,8 +15,8 @@ import torch
 from lhotse import AudioSource, CutSet, MonoCut, Recording, SupervisionSegment
 from lhotse.array import TemporalArray
 from lhotse.features.io import MemoryRawWriter
-from lhotse.indexing import create_tar_index
-from lhotse.shar.writers import ArrayTarWriter, AudioTarWriter, SharWriter
+from lhotse.indexing import create_shar_index, create_tar_index
+from lhotse.shar.writers import ArrayTarWriter, AudioTarWriter, JsonlShardWriter, SharWriter
 from omegaconf import OmegaConf
 
 from nemo.collections.common.data.lhotse import get_lhotse_dataloader_from_config
@@ -140,6 +141,64 @@ def production_shar(tmp_path) -> tuple[Path, dict[str, dict[str, np.ndarray]]]:
     for tar in root.glob("*/**/*.tar"):
         create_tar_index(tar)
     return root, expected
+
+
+@pytest.fixture
+def resampled_tar_shar(tmp_path) -> Path:
+    """
+    The cuts carry the ORIGINAL recording, a 32 kHz source with two resample transforms down to 16 kHz, as the
+    release cuts do; the audio tar holds the 24 kHz bytes and a tar manifest that describes exactly those
+    bytes (no transforms), as ``AudioTarWriter`` writes it. The eager and streaming readers take the tar
+    manifest, so loading works; lazy mode must take it too, or it applies the stale transforms to the bytes.
+    """
+    root = tmp_path / "resampled-tar-shar"
+    root.mkdir()
+    rng = np.random.default_rng(3)
+    with (
+        JsonlShardWriter(f"{root}/cuts.%06d.jsonl.gz", shard_size=SHARD_SIZE) as cuts_writer,
+        AudioTarWriter(f"{root}/recording.%06d.tar", shard_size=SHARD_SIZE, format="wav") as tar_writer,
+    ):
+        for idx in range(NUM_CUTS):
+            audio_24k = rng.uniform(-0.3, 0.3, (1, 24000)).astype(np.float32)  # one second at 24 kHz
+            tar_manifest = Recording(
+                id=f"rec-{idx:04d}",
+                sources=[AudioSource(type="memory", channels=[0], source=b"")],
+                sampling_rate=24000,
+                num_samples=24000,
+                duration=1.0,
+            )
+            tar_writer.write(f"cut-{idx:04d}", audio_24k, 24000, manifest=tar_manifest)
+            original = Recording(
+                id=f"rec-{idx:04d}",
+                sources=[AudioSource(type="file", channels=[0], source=f"/original/rec-{idx:04d}.wav")],
+                sampling_rate=32000,
+                num_samples=32000,
+                duration=1.0,
+            )
+            recording = original.resample(24000).resample(16000)
+            cuts_writer.write(
+                MonoCut(
+                    id=f"cut-{idx:04d}",
+                    start=0.0,
+                    duration=1.0,
+                    channel=0,
+                    recording=recording,
+                    supervisions=[
+                        SupervisionSegment(
+                            id=f"sup-{idx:04d}", recording_id=recording.id, start=0.0, duration=1.0, text="x"
+                        )
+                    ],
+                )
+            )
+    create_shar_index(root)
+    return root
+
+
+def _lazy_reader_keeps_cuts_manifest() -> bool:
+    """The lhotse#1598 head reads the tar metadata only for fields the cut lacks (fixed by the recipe's patch)."""
+    from lhotse.shar.readers.indexed import LazyIndexedSharIterator
+
+    return "getattr(cut, field, None) is None" in inspect.getsource(LazyIndexedSharIterator.__getitem__)
 
 
 def _production_fields(root: Path) -> dict[str, str]:
@@ -385,6 +444,35 @@ def test_lazy_payloads_for_fields_without_placeholders(production_shar):
         else:
             # A ``.nodata`` member means the cut has no such field at all.
             assert not cut.has_custom("context_audio")
+    assert seen == set(expected)
+
+
+def test_lazy_payloads_take_field_manifest_from_tar(resampled_tar_shar):
+    if _lazy_reader_keeps_cuts_manifest():
+        pytest.skip(
+            "installed Lhotse keeps the cuts manifest for fields the cuts carry (needs the lazy tar-manifest fix)"
+        )
+    eager, _ = read_cutset_from_config(
+        OmegaConf.create(
+            {"shar_path": str(resampled_tar_shar), "indexed": True, "force_finite": True, "shard_seed": 0}
+        )
+    )
+    expected = {cut.id: cut for cut in eager}
+
+    cuts, _ = read_cutset_from_config(_lazy_config(str(resampled_tar_shar)))
+
+    seen = set()
+    for cut in cuts:
+        seen.add(cut.id)
+        reference = expected[cut.id]
+        # Same manifest as the eager reader: the tar's, not the stale one from the cuts.
+        assert cut.recording.sampling_rate == reference.recording.sampling_rate == 24000
+        assert not cut.recording.transforms
+        assert cut.recording.sources[0].type == "shar_ptr"
+        np.testing.assert_array_equal(cut.load_audio(), reference.load_audio())
+        np.testing.assert_array_equal(
+            cut.truncate(duration=0.5).load_audio(), reference.truncate(duration=0.5).load_audio()
+        )
     assert seen == set(expected)
 
 
