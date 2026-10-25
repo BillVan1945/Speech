@@ -23,7 +23,7 @@ from torch import nn
 
 from nemo.collections.asr.parts.submodules.multi_head_attention import RotaryPositionalEncoding
 from nemo.collections.common.parts import form_attention_mask
-from nemo.collections.common.parts.utils import activation_registry
+from nemo.collections.common.parts.utils import build_activation
 
 __all__ = ["TransformerEmbedding", "AttentionBridge", "RMSNorm", "PositionWiseFF", "GatedPositionWiseFF"]
 
@@ -295,15 +295,6 @@ class MultiHeadAttention(nn.Module):
         return output_states, extra_output
 
 
-def _activation(activation: nn.Module | str) -> nn.Module:
-    """The activation module given, or the one the activation registry has under this name."""
-    if isinstance(activation, str):
-        if activation not in activation_registry:
-            raise ValueError(f"unknown activation {activation!r}; the registry has {sorted(activation_registry)}")
-        return activation_registry[activation]()
-    return activation
-
-
 class PositionWiseFF(nn.Module):
     """
     Position-wise feed-forward network of Transformer block.
@@ -325,7 +316,7 @@ class PositionWiseFF(nn.Module):
         self.dense_in = nn.Linear(hidden_size, inner_size, bias=use_bias)
         self.dense_out = nn.Linear(inner_size, hidden_size, bias=use_bias)
         self.layer_dropout = nn.Dropout(ffn_dropout)
-        self.act_fn = _activation(hidden_act)
+        self.act_fn = build_activation(hidden_act)
 
     def forward(self, hidden_states):
         output_states = self.dense_in(hidden_states)
@@ -368,8 +359,8 @@ class GatedPositionWiseFF(nn.Module):
         self.dense_in = nn.Linear(hidden_size, 2 * inner_size, bias=use_bias)
         self.dense_out = nn.Linear(inner_size, hidden_size, bias=use_bias)
         self.layer_dropout = nn.Dropout(ffn_dropout)
-        self.act_fn = _activation(hidden_act)
-        self.gate_act_fn = _activation(gate_act)
+        self.act_fn = build_activation(hidden_act)
+        self.gate_act_fn = build_activation(gate_act)
 
     def forward(self, hidden_states):
         activated, gate = self.dense_in(hidden_states).chunk(2, dim=-1)
