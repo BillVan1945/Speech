@@ -38,7 +38,14 @@ def rnnt_fused_joint(
     input_grad_full_precision: bool = True,
     weight_grad_full_precision: bool = True,
     backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
+    mm_full_precision: bool = False,
 ):
+    """Fuse Joint hidden computation and vocabulary projection into target/blank log-probabilities.
+
+    BF16 projected inputs use BF16 matmul operands even with FP32 master weights. ``mm_full_precision=True``
+    selects FP32 operands; ``use_high_precision_mm=True`` selects FP32 operands and IEEE input precision.
+    Gradient accumulation precision is controlled separately by the gradient flags.
+    """
     backend = TurboTransducerBackend(backend) if backend is not None else None
 
     if backend is None:
@@ -68,6 +75,7 @@ def rnnt_fused_joint(
                 use_high_precision_mm=use_high_precision_mm,
                 input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
+                mm_full_precision=mm_full_precision,
             )
         case TurboTransducerBackend.CUTILE:
             if not CUTILE_AVAILABLE:

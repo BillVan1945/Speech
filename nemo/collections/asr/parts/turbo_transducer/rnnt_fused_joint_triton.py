@@ -106,7 +106,7 @@ def _bwd_autotune_configs():
 
 @triton.autotune(
     configs=_fwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM"],
+    key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM", "MM_FULL_PRECISION"],
     cache_results=True,
 )
 @triton.jit
@@ -136,6 +136,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     USE_DROPOUT: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     USE_HIGH_PRECISION_MM: tl.constexpr = False,
+    MM_FULL_PRECISION: tl.constexpr = False,
 ):
     """
     Forward kernel for fused RNN-T Joint + log-softmax.
@@ -146,8 +147,8 @@ def _rnnt_fused_joint_fwd_triton_kernel(
     2. Online log-softmax across vocab chunks
     3. Extract target/blank log-probs
 
-    Calculations are performed in float32.
-    When USE_HIGH_PRECISION_MM is False, tl.dot uses TF32 (faster but ~10-bit mantissa).
+    Accumulation uses float32. BF16 projected inputs use BF16 matmul operands unless MM_FULL_PRECISION or
+    USE_HIGH_PRECISION_MM is set. FP32 operands use TF32 by default, or IEEE math with USE_HIGH_PRECISION_MM.
     """
     batch_i = tl.program_id(axis=0)
     source_block_i, target_block_i = tl.swizzle2d(
@@ -171,11 +172,11 @@ def _rnnt_fused_joint_fwd_triton_kernel(
         tl.bfloat16
         if (
             (
-                weight_ptr.dtype.element_ty == tl.bfloat16
-                and encoder_output_ptr.dtype.element_ty == tl.bfloat16
+                encoder_output_ptr.dtype.element_ty == tl.bfloat16
                 and predictor_output_ptr.dtype.element_ty == tl.bfloat16
             )
             and (not USE_HIGH_PRECISION_MM)
+            and (not MM_FULL_PRECISION)
         )
         else compute_dtype
     )
@@ -329,7 +330,7 @@ def _rnnt_fused_joint_fwd_triton_kernel(
 
 @triton.autotune(
     configs=_bwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM"],
+    key=["hidden_dim", "vocab_size", "USE_DROPOUT", "USE_HIGH_PRECISION_MM", "MM_FULL_PRECISION"],
     reset_to_zero=["grad_encoder_out_ptr", "grad_predictor_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
     cache_results=True,
 )
@@ -364,17 +365,18 @@ def _rnnt_fused_joint_bwd_triton_kernel(
     USE_DROPOUT: tl.constexpr,
     GROUP_SIZE: tl.constexpr = 4,
     USE_HIGH_PRECISION_MM: tl.constexpr = False,
+    MM_FULL_PRECISION: tl.constexpr = False,
 ):
     compute_dtype = tl.float32
     matmul_dtype = (
         tl.bfloat16
         if (
             (
-                weight_ptr.dtype.element_ty == tl.bfloat16
-                and encoder_output_ptr.dtype.element_ty == tl.bfloat16
+                encoder_output_ptr.dtype.element_ty == tl.bfloat16
                 and predictor_output_ptr.dtype.element_ty == tl.bfloat16
             )
             and (not USE_HIGH_PRECISION_MM)
+            and (not MM_FULL_PRECISION)
         )
         else compute_dtype
     )
@@ -635,6 +637,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         use_high_precision_mm: bool = False,
         input_grad_full_precision: bool = True,
         weight_grad_full_precision: bool = True,
+        mm_full_precision: bool = False,
     ):
         if activation != "relu":
             raise NotImplementedError("Only relu activation is supported")
@@ -662,6 +665,13 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
         targets = targets.contiguous()
         weight = weight.contiguous()
         bias = bias.contiguous()
+        matmul_weight = (
+            weight.to(torch.bfloat16)
+            if encoder_output_projected.dtype == predictor_output_projected.dtype == torch.bfloat16
+            and not mm_full_precision
+            and not use_high_precision_mm
+            else weight
+        )
 
         device = encoder_output_projected.device
         batch_size, src_max_length, hidden_dim = encoder_output_projected.shape
@@ -686,7 +696,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
+            weight_ptr=matmul_weight,
             bias_ptr=bias,
             target_logprobs_out_ptr=target_logprobs,
             blank_logprobs_out_ptr=blank_logprobs,
@@ -701,6 +711,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             blank_id=blank_id,
             USE_DROPOUT=use_dropout,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
+            MM_FULL_PRECISION=mm_full_precision,
         )
 
         ctx.save_for_backward(
@@ -712,9 +723,11 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             src_lengths,
             tgt_lengths,
             log_sum_exp_scores,
+            matmul_weight,
         )
         ctx.blank_id = blank_id
         ctx.use_high_precision_mm = use_high_precision_mm
+        ctx.mm_full_precision = mm_full_precision
         ctx.use_dropout = use_dropout
         ctx.mixed_dropout_seed = mixed_dropout_seed
         ctx.dropout_threshold = dropout_threshold
@@ -735,9 +748,11 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             src_lengths,
             tgt_lengths,
             log_sum_exp_scores,
+            matmul_weight,
         ) = ctx.saved_tensors
         blank_id = ctx.blank_id
         use_high_precision_mm = ctx.use_high_precision_mm
+        mm_full_precision = ctx.mm_full_precision
         use_dropout = ctx.use_dropout
         mixed_dropout_seed = ctx.mixed_dropout_seed
         dropout_threshold = ctx.dropout_threshold
@@ -790,7 +805,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
+            weight_ptr=matmul_weight,
             bias_ptr=bias,
             log_sum_exp_ptr=log_sum_exp_scores,
             grad_target_scores_ptr=grad_target_scores,
@@ -809,6 +824,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             blank_id=blank_id,
             USE_DROPOUT=use_dropout,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
+            MM_FULL_PRECISION=mm_full_precision,
         )
 
         # convert grad to desired dtype
@@ -825,6 +841,7 @@ class _RnntFusedJointTritonFunction(torch.autograd.Function):
             None,
             grad_weight,
             grad_bias,
+            None,
             None,
             None,
             None,
@@ -850,6 +867,7 @@ def rnnt_fused_joint_triton(
     use_high_precision_mm: bool = False,
     input_grad_full_precision: bool = True,
     weight_grad_full_precision: bool = True,
+    mm_full_precision: bool = False,
 ):
     target_logprobs, blank_logprobs = _RnntFusedJointTritonFunction.apply(
         encoder_output_projected,
@@ -866,5 +884,6 @@ def rnnt_fused_joint_triton(
         use_high_precision_mm,
         input_grad_full_precision,
         weight_grad_full_precision,
+        mm_full_precision,
     )
     return target_logprobs, blank_logprobs

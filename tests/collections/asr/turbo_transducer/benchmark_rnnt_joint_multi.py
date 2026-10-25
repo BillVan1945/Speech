@@ -22,6 +22,11 @@ optionally writes a CSV.
 
 Usage:
     python benchmark_rnnt_joint_multi.py --csv-output _checks/benchmark.csv
+    python benchmark_rnnt_joint_multi.py --dtype bf16-mixed
+    python benchmark_rnnt_joint_multi.py --dtype bfloat16-mixed --mm-full-precision
+
+Mixed precision keeps the projection parameters in FP32 and runs forward under BF16 autocast.
+Matmul precision overrides apply to optimized Joint implementations; standard Joint follows PyTorch settings.
 """
 
 import argparse
@@ -30,6 +35,7 @@ import sys
 import torch
 
 from tests.collections.asr.turbo_transducer.benchmark_rnnt_joint import (
+    VALID_DTYPES,
     BenchmarkResults,
     get_dtype,
     print_results_table,
@@ -54,7 +60,7 @@ EXPERIMENTS: list[tuple[str, str, str]] = [
     # ("standard", "-", "warprnnt_numba"),
     ("standard", "-", "turbo_rnnt"),
     ("fused_vocab", "triton", "turbo_rnnt"),
-    #("fused_vocab", "cutile", "turbo_rnnt"),
+    # ("fused_vocab", "cutile", "turbo_rnnt"),
     ("fused", "triton", "turbo_rnnt"),
     # ("fused", "cutile", "turbo_rnnt"),  # not yet implemented
 ]
@@ -76,7 +82,11 @@ def main() -> None:
         "-fo", "--forward-only", action="store_true", help="Benchmark forward pass only (skip backward)"
     )
     parser.add_argument("--no-dropout", action="store_true", help="Disable dropout (enabled by default, p=0.2)")
-    parser.add_argument("--dtype", type=str, default="bfloat16")
+    parser.add_argument("--dtype", type=str, default="bfloat16", choices=VALID_DTYPES)
+    parser.add_argument('--mm-full-precision', action='store_true', help='Use FP32 matmul operands in optimized Joint')
+    parser.add_argument(
+        '--use-high-precision-mm', action='store_true', help='Use FP32 operands and IEEE matmuls in Triton Joint'
+    )
     parser.add_argument(
         "--fused-batch-size",
         type=int,
@@ -128,6 +138,8 @@ def main() -> None:
                 forward_only=args.forward_only,
                 dropout_p=dropout_p,
                 fused_batch_size=args.fused_batch_size if joint == "standard" else 0,
+                mm_full_precision=args.mm_full_precision if joint != "standard" else False,
+                use_high_precision_mm=args.use_high_precision_mm if joint != "standard" else False,
             )
             results.append(result)
 

@@ -1314,6 +1314,10 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
         turbo_kernel: Optional configuration for an optimized training-only Joint implementation. Supported
             types are ``fused_vocab`` and ``fused``. The optimized path returns only target and blank
             log-probabilities and therefore requires a compatible RNN-T loss.
+            BF16 activations use BF16 matmul operands with FP32 master parameters. Set
+            ``turbo_kernel.kwargs.mm_full_precision=true`` for FP32 operands, or
+            ``turbo_kernel.kwargs.use_high_precision_mm=true`` for FP32 operands with IEEE math in Triton.
+            Gradient accumulation precision is configured separately.
 
         fuse_loss_wer: Optional bool, set to False by default.
 
@@ -1521,6 +1525,7 @@ class RNNTJoint(rnnt_abstract.AbstractRNNTJoint, Exportable, AdapterModuleMixin)
         kernel_kwargs = dict(kernel_kwargs)
         supported_kwargs = {
             'backend',
+            'mm_full_precision',
             'input_grad_full_precision',
             'use_high_precision_mm',
             'weight_grad_full_precision',

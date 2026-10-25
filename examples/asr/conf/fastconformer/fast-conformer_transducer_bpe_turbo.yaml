@@ -190,8 +190,11 @@ model:
     turbo_kernel:
       type: null  # null, fused_vocab, fused
       kwargs:
-        use_high_precision_mm: false
-        # Accumulate gradients for the Joint input and vocabulary projection in float32.
+        # BF16 activations use BF16 matmul operands even with FP32 master weights (bf16-mixed training).
+        mm_full_precision: false  # true selects FP32 operands; Triton defaults to TF32 input precision
+        use_high_precision_mm: false  # true selects FP32 operands and IEEE input precision in Triton
+        # Gradient accumulation precision is independent of the matmul operands.
+        # The Ampere fused_vocab chunked backward always accumulates parameter gradients in FP32.
         input_grad_full_precision: true
         weight_grad_full_precision: true
         backend: triton

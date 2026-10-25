@@ -59,6 +59,43 @@ _BACKEND_PARAMS = [
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("backend", _BACKEND_PARAMS)
 class TestRnntJointVocabLogProbs:
+    @pytest.mark.parametrize("mm_full_precision", [False, True])
+    def test_mixed_precision_master_weights(self, backend, mm_full_precision):
+        torch.manual_seed(42)
+        hidden, weight, bias, targets, src_lengths, tgt_lengths = _make_fused_vocab_inputs(
+            (2, 5, 3, 32, 16), torch.bfloat16, variable_lengths=True, device=torch.device("cuda")
+        )
+        weight = weight.float() + 0.001 * torch.randn_like(weight.float())
+        bias = bias.float()
+        outputs, gradients = [], []
+        for hidden_value, weight_value in [
+            (hidden.float(), weight) if mm_full_precision else (hidden, weight.bfloat16()),
+            (hidden, weight),
+        ]:
+            inputs = [value.detach().clone().requires_grad_() for value in (hidden_value, weight_value, bias)]
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                target, blank = rnnt_joint_fused_vocab(
+                    joint_hidden=inputs[0],
+                    weight=inputs[1],
+                    bias=inputs[2],
+                    targets=targets,
+                    src_lengths=src_lengths,
+                    tgt_lengths=tgt_lengths,
+                    blank_id=16,
+                    backend=backend,
+                    mm_full_precision=mm_full_precision,
+                    input_grad_full_precision=True,
+                    weight_grad_full_precision=True,
+                )
+            (target.sum() + blank.sum()).backward()
+            outputs.append((target, blank))
+            gradients.append([value.grad for value in inputs])
+        for actual, expected in zip(outputs[1], outputs[0]):
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        for actual, expected in zip(gradients[1], gradients[0]):
+            torch.testing.assert_close(actual.float(), expected.to(actual.dtype).float(), atol=0.03, rtol=0.02)
+        assert gradients[1][1].dtype == gradients[1][2].dtype == torch.float32
+
     @pytest.mark.parametrize(
         "shape",
         [
@@ -478,6 +515,59 @@ def _make_fused_vocab_inputs(shape, float_dtype, variable_lengths: bool, device:
 @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed")
 class TestRnntJointFusedVocabTritonBackwardModes:
     """Both Triton backward algorithms are tested explicitly, independent of the GPU-based default selection."""
+
+    @pytest.mark.parametrize("backward_mode", _TRITON_BACKWARD_MODE_PARAMS)
+    @pytest.mark.parametrize("mm_full_precision,use_high_precision_mm", [(False, False), (True, False), (False, True)])
+    def test_mixed_precision(self, backward_mode, mm_full_precision, use_high_precision_mm, monkeypatch):
+        """FP32 master weights must not promote BF16 computation; backward preserves parameter dtypes."""
+        torch.manual_seed(42)
+        hidden, weight, bias, targets, src_lengths, tgt_lengths = _make_fused_vocab_inputs(
+            (3, 17, 9, 64, 100), torch.bfloat16, variable_lengths=True, device=torch.device("cuda")
+        )
+        weight = weight.float() + 0.001 * torch.randn_like(weight.float())
+        bias = bias.float()
+        # Exercise multiple chunks and a partial final chunk, including the FP32 matmul path.
+        monkeypatch.setattr(fused_vocab_triton_module, "CHUNKED_BWD_GRAD_LOGITS_BUFFER_BYTES", 256 * 128 * 2)
+        full_precision = mm_full_precision or use_high_precision_mm
+        original_addmm = fused_vocab_triton_module._addmm_full_precision_
+
+        def check_matmul_operands(accumulator, mat1, mat2):
+            assert accumulator.dtype == torch.float32
+            assert mat1.dtype == mat2.dtype == (torch.float32 if full_precision else torch.bfloat16)
+            original_addmm(accumulator, mat1, mat2)
+
+        monkeypatch.setattr(fused_vocab_triton_module, "_addmm_full_precision_", check_matmul_operands)
+        reference_hidden = hidden.float() if full_precision else hidden
+        reference_weight = weight if full_precision else weight.bfloat16()
+        outputs, gradients = [], []
+        for hidden_value, weight_value in [(reference_hidden, reference_weight), (hidden, weight)]:
+            hidden_value = hidden_value.detach().clone().requires_grad_()
+            weight_value = weight_value.detach().clone().requires_grad_()
+            bias_value = bias.detach().clone().requires_grad_()
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                target, blank = rnnt_joint_fused_vocab_triton(
+                    joint_hidden=hidden_value,
+                    targets=targets,
+                    tgt_lengths=tgt_lengths,
+                    src_lengths=src_lengths,
+                    weight=weight_value,
+                    bias=bias_value,
+                    blank_id=100,
+                    use_high_precision_mm=use_high_precision_mm,
+                    input_grad_full_precision=True,
+                    weight_grad_full_precision=True,
+                    backward_mode=backward_mode,
+                    **({"mm_full_precision": True} if mm_full_precision else {}),
+                )
+            (target.sum() + blank.sum()).backward()
+            outputs.append((target, blank))
+            gradients.append((hidden_value.grad, weight_value.grad, bias_value.grad))
+        for actual, expected in zip(outputs[1], outputs[0]):
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        for actual, expected in zip(gradients[1], gradients[0]):
+            torch.testing.assert_close(actual.float(), expected.to(actual.dtype).float(), atol=0.03, rtol=0.02)
+        assert gradients[1][0].dtype == torch.bfloat16
+        assert gradients[1][1].dtype == gradients[1][2].dtype == torch.float32
 
     @pytest.mark.parametrize("backward_mode", _TRITON_BACKWARD_MODE_PARAMS)
     @pytest.mark.parametrize(

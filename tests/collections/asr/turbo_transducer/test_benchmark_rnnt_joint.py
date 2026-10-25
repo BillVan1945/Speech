@@ -15,7 +15,86 @@
 import pytest
 import torch
 
-from tests.collections.asr.turbo_transducer import benchmark_rnnt_joint
+from tests.collections.asr.turbo_transducer import benchmark_rnnt_joint, benchmark_rnnt_joint_multi
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["bf16-mixed", "bfloat16-mixed"])
+def test_mixed_precision_dtype_aliases(name):
+    assert benchmark_rnnt_joint.get_dtype(name) == "bfloat16-mixed"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize(
+    "joint,fused_batch_size", [("standard", 0), ("standard", 1), ("fused_vocab", 0), ("fused", 0)]
+)
+def test_mixed_precision_benchmark_preserves_master_weights(monkeypatch, joint, fused_batch_size):
+    calls = []
+
+    def check_backward(gradient):
+        assert not torch.is_autocast_enabled("cuda")
+        return gradient
+
+    def record_inputs(hidden, weight, bias):
+        assert torch.is_autocast_enabled("cuda")
+        assert hidden.dtype == torch.bfloat16
+        assert weight.dtype == bias.dtype == torch.float32
+        weight.register_hook(check_backward)
+        calls.append(True)
+
+    original_linear = torch.nn.functional.linear
+
+    def record_linear(hidden, weight, bias=None):
+        record_inputs(hidden, weight, bias)
+        return original_linear(hidden, weight, bias)
+
+    def fake_fused_vocab(joint_hidden, weight, bias, **kwargs):
+        record_inputs(joint_hidden, weight, bias)
+        anchor = joint_hidden.float().sum(-1) + weight.sum() + bias.sum()
+        return anchor, anchor
+
+    def fake_fused(encoder_output_projected, predictor_output_projected, weight, bias, **kwargs):
+        hidden = encoder_output_projected.unsqueeze(2) + predictor_output_projected.unsqueeze(1)
+        return fake_fused_vocab(hidden, weight, bias)
+
+    monkeypatch.setattr(torch.nn.functional, "linear", record_linear)
+    monkeypatch.setattr(benchmark_rnnt_joint, "rnnt_joint_fused_vocab", fake_fused_vocab)
+    monkeypatch.setattr(benchmark_rnnt_joint, "rnnt_fused_joint", fake_fused)
+    result = benchmark_rnnt_joint.run_benchmark(
+        joint=joint,
+        loss="turbo_rnnt",
+        dtype="bf16-mixed",
+        batch_size=2,
+        max_time=4,
+        max_targets=3,
+        hidden_dim=32,
+        vocab_size=17,
+        warmup_iters=1,
+        bench_iters=1,
+        fused_batch_size=fused_batch_size,
+    )
+    assert calls
+    assert result.dtype == "bfloat16-mixed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("dtype", ["bf16-mixed", "bfloat16-mixed"])
+def test_multi_benchmark_passes_precision_options(monkeypatch, dtype):
+    calls = []
+    monkeypatch.setattr("sys.argv", ["benchmark_rnnt_joint_multi.py", "--dtype", dtype, "--mm-full-precision"])
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device: "test GPU")
+    monkeypatch.setattr(benchmark_rnnt_joint_multi, "VOCAB_SIZES", [17])
+    monkeypatch.setattr(
+        benchmark_rnnt_joint_multi,
+        "EXPERIMENTS",
+        [("standard", "-", "turbo_rnnt"), ("fused_vocab", "triton", "turbo_rnnt")],
+    )
+    monkeypatch.setattr(benchmark_rnnt_joint_multi, "run_benchmark", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(benchmark_rnnt_joint_multi, "print_results_table", lambda results: None)
+    benchmark_rnnt_joint_multi.main()
+    assert [call["dtype"] for call in calls] == ["bfloat16-mixed"] * 2
+    assert [call["mm_full_precision"] for call in calls] == [False, True]
 
 
 class _RecordingLoss(torch.nn.Module):

@@ -153,7 +153,7 @@ def _bwd_chunked_grad_logits_autotune_configs():
 
 @triton.autotune(
     configs=_fwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
+    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM", "MM_FULL_PRECISION"],
     cache_results=True,
 )
 @triton.jit
@@ -177,13 +177,15 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
     USE_HIGH_PRECISION_MM: tl.constexpr,
+    MM_FULL_PRECISION: tl.constexpr = False,
 ):
     compute_dtype = tl.float32
     matmul_dtype = (
         tl.bfloat16
         if (
-            (weight_ptr.dtype.element_ty == tl.bfloat16 and joint_hidden_ptr.dtype.element_ty == tl.bfloat16)
+            joint_hidden_ptr.dtype.element_ty == tl.bfloat16
             and (not USE_HIGH_PRECISION_MM)
+            and (not MM_FULL_PRECISION)
         )
         else compute_dtype
     )
@@ -310,7 +312,7 @@ def _rnnt_joint_fused_vocab_fwd_triton_kernel(
 
 @triton.autotune(
     configs=_bwd_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
+    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM", "MM_FULL_PRECISION"],
     reset_to_zero=["grad_joint_hidden_out_ptr", "grad_weight_out_ptr", "grad_bias_out_ptr"],
     cache_results=True,
 )
@@ -338,13 +340,15 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
     HIDDEN_BLOCK: tl.constexpr,
     VOCAB_BLOCK: tl.constexpr,
     USE_HIGH_PRECISION_MM: tl.constexpr = False,
+    MM_FULL_PRECISION: tl.constexpr = False,
 ):
     compute_dtype = tl.float32
     matmul_dtype = (
         tl.bfloat16
         if (
-            (weight_ptr.dtype.element_ty == tl.bfloat16 and joint_hidden_ptr.dtype.element_ty == tl.bfloat16)
+            joint_hidden_ptr.dtype.element_ty == tl.bfloat16
             and (not USE_HIGH_PRECISION_MM)
+            and (not MM_FULL_PRECISION)
         )
         else compute_dtype
     )
@@ -512,7 +516,7 @@ def _rnnt_joint_fused_vocab_bwd_triton_kernel(
 
 @triton.autotune(
     configs=_bwd_chunked_grad_logits_autotune_configs(),
-    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM"],
+    key=["hidden_dim", "vocab_size", "USE_HIGH_PRECISION_MM", "MM_FULL_PRECISION"],
     reset_to_zero=["grad_bias_out_ptr"],
     cache_results=True,
 )
@@ -543,6 +547,7 @@ def _rnnt_joint_fused_vocab_bwd_grad_logits_triton_kernel(
     VOCAB_BLOCK: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
     USE_HIGH_PRECISION_MM: tl.constexpr = False,
+    MM_FULL_PRECISION: tl.constexpr = False,
 ):
     """
     Recompute logits for rows [chunk_start, chunk_start + chunk_size) of the flattened batch and store grad logits
@@ -553,8 +558,9 @@ def _rnnt_joint_fused_vocab_bwd_grad_logits_triton_kernel(
     matmul_dtype = (
         tl.bfloat16
         if (
-            (weight_ptr.dtype.element_ty == tl.bfloat16 and joint_hidden_ptr.dtype.element_ty == tl.bfloat16)
+            joint_hidden_ptr.dtype.element_ty == tl.bfloat16
             and (not USE_HIGH_PRECISION_MM)
+            and (not MM_FULL_PRECISION)
         )
         else compute_dtype
     )
@@ -676,6 +682,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         input_grad_full_precision: bool = False,
         weight_grad_full_precision: bool = False,
         backward_mode: FusedVocabBackwardMode = FusedVocabBackwardMode.ATOMIC,
+        mm_full_precision: bool = False,
     ):
         float_dtype = torch.float64 if joint_hidden.dtype == torch.float64 else torch.float32
 
@@ -690,6 +697,13 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         tgt_lengths = tgt_lengths.contiguous()
         weight = weight.contiguous()
         bias = bias.contiguous()
+        # Cast once, rather than reloading and converting FP32 master weights in every vocabulary tile.
+        # Keep the original parameter for its version check and FP32 gradient storage.
+        matmul_weight = (
+            weight.to(torch.bfloat16)
+            if joint_hidden.dtype == torch.bfloat16 and not mm_full_precision and not use_high_precision_mm
+            else weight
+        )
 
         target_logprobs = torch.zeros(
             [batch_size, src_max_length, tgt_max_length_plus_1], dtype=float_dtype, device=device
@@ -704,7 +718,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
+            weight_ptr=matmul_weight,
             bias_ptr=bias,
             target_logprobs_out_ptr=target_logprobs,
             blank_logprobs_out_ptr=blank_logprobs,
@@ -716,11 +730,15 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             vocab_size=vocab_size,
             blank_id=blank_id,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
+            MM_FULL_PRECISION=mm_full_precision,
         )
 
-        ctx.save_for_backward(joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores)
+        ctx.save_for_backward(
+            joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores, matmul_weight
+        )
         ctx.blank_id = blank_id
         ctx.use_high_precision_mm = use_high_precision_mm
+        ctx.mm_full_precision = mm_full_precision
         ctx.input_grad_full_precision = input_grad_full_precision
         ctx.weight_grad_full_precision = weight_grad_full_precision
         ctx.backward_mode = backward_mode
@@ -728,9 +746,12 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_target_scores, grad_blank_scores):
-        (joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores) = ctx.saved_tensors
+        (joint_hidden, weight, bias, targets, src_lengths, tgt_lengths, log_sum_exp_scores, matmul_weight) = (
+            ctx.saved_tensors
+        )
         blank_id = ctx.blank_id
         use_high_precision_mm = ctx.use_high_precision_mm
+        mm_full_precision = ctx.mm_full_precision
         input_grad_full_precision = ctx.input_grad_full_precision
         if input_grad_full_precision is None:
             input_grad_full_precision = use_high_precision_mm
@@ -755,8 +776,10 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
                 grad_blank_scores=grad_blank_scores,
                 blank_id=blank_id,
                 use_high_precision_mm=use_high_precision_mm,
+                mm_full_precision=mm_full_precision,
+                matmul_weight=matmul_weight,
             )
-            return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None, None
+            return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None, None, None
 
         batch_size, src_max_length, tgt_max_length_plus_1, hidden_dim = joint_hidden.shape
         flattened_batch_size = batch_size * src_max_length * tgt_max_length_plus_1
@@ -788,7 +811,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
+            weight_ptr=matmul_weight,
             bias_ptr=bias,
             log_sum_exp_ptr=log_sum_exp_scores,
             grad_target_scores_ptr=grad_target_scores,
@@ -803,6 +826,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
             vocab_size=vocab_size,
             blank_id=blank_id,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
+            MM_FULL_PRECISION=mm_full_precision,
         )
 
         # convert grad to desired dtype
@@ -810,7 +834,7 @@ class _RnntJointFusedVocabTritonFunction(torch.autograd.Function):
         grad_bias = grad_bias.to(bias.dtype)
         grad_joint_hidden = grad_joint_hidden.to(joint_hidden.dtype)
 
-        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None, None
+        return grad_joint_hidden, None, None, None, grad_weight, grad_bias, None, None, None, None, None, None
 
 
 def rnnt_joint_fused_vocab_triton(
@@ -825,11 +849,18 @@ def rnnt_joint_fused_vocab_triton(
     input_grad_full_precision: bool = False,
     weight_grad_full_precision: bool = False,
     backward_mode: str | FusedVocabBackwardMode | None = None,
+    mm_full_precision: bool = False,
 ):
     """
     Compute target and blank log probabilities from joint hidden without materializing logits [B, T, U+1, V].
 
     Args:
+        mm_full_precision: Use FP32 matmul operands even for BF16 activations. Otherwise BF16 activations use
+            BF16 operands, including when the projection parameters are FP32 master weights. Parameter gradients
+            retain their original dtype. FP32 matmuls use Triton's default input precision and PyTorch's global
+            matmul precision setting in the chunked GEMMs.
+        use_high_precision_mm: Use FP32 operands and IEEE input precision in Triton. This implies full precision
+            operands independently of ``mm_full_precision``, preserving the existing high-precision behavior.
         backward_mode: backward algorithm, see `FusedVocabBackwardMode`. If None, selected automatically:
             ATOMIC on GPUs with native bf16 atomics (compute capability >= 9.0), CHUNKED otherwise.
             input_grad_full_precision / weight_grad_full_precision affect only the ATOMIC mode
@@ -850,6 +881,7 @@ def rnnt_joint_fused_vocab_triton(
         input_grad_full_precision,
         weight_grad_full_precision,
         backward_mode,
+        mm_full_precision,
     )
     return target_logprobs, blank_logprobs
 
@@ -874,6 +906,8 @@ def _rnnt_joint_fused_vocab_bwd_chunked(
     grad_blank_scores: torch.Tensor,
     blank_id: int,
     use_high_precision_mm: bool,
+    mm_full_precision: bool = False,
+    matmul_weight: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Backward by row chunks of the flattened batch: Triton kernel recomputes logits and writes grad logits
@@ -886,10 +920,10 @@ def _rnnt_joint_fused_vocab_bwd_chunked(
     vocab_size = weight.shape[0]
     device = joint_hidden.device
 
-    use_low_precision_mm = (
-        joint_hidden.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16 and not use_high_precision_mm
-    )
+    use_low_precision_mm = joint_hidden.dtype == torch.bfloat16 and not mm_full_precision and not use_high_precision_mm
     grad_logits_dtype = torch.bfloat16 if use_low_precision_mm else float_dtype
+    if matmul_weight is None:
+        matmul_weight = weight.to(torch.bfloat16) if use_low_precision_mm else weight
     padded_vocab_size = triton.cdiv(vocab_size, _CHUNKED_BWD_VOCAB_PADDING) * _CHUNKED_BWD_VOCAB_PADDING
     chunk_rows = CHUNKED_BWD_GRAD_LOGITS_BUFFER_BYTES // (padded_vocab_size * grad_logits_dtype.itemsize)
     chunk_rows = max(chunk_rows // _CHUNKED_BWD_ROWS_MULTIPLE, 1) * _CHUNKED_BWD_ROWS_MULTIPLE
@@ -898,7 +932,7 @@ def _rnnt_joint_fused_vocab_bwd_chunked(
     joint_hidden_flat = joint_hidden.view(flattened_batch_size, hidden_dim)
     # zero rows for padded vocab: grad logits there are zeros, padding only keeps GEMM operands aligned
     weight_padded = torch.zeros([padded_vocab_size, hidden_dim], dtype=grad_logits_dtype, device=device)
-    weight_padded[:vocab_size] = weight
+    weight_padded[:vocab_size] = matmul_weight
     grad_logits_buffer = torch.empty([chunk_rows, padded_vocab_size], dtype=grad_logits_dtype, device=device)
 
     # each element of grad joint hidden is computed by a single GEMM => store directly in the output dtype
@@ -918,7 +952,7 @@ def _rnnt_joint_fused_vocab_bwd_chunked(
             targets_ptr=targets,
             src_lengths_ptr=src_lengths,
             tgt_lengths_ptr=tgt_lengths,
-            weight_ptr=weight,
+            weight_ptr=matmul_weight,
             bias_ptr=bias,
             log_sum_exp_ptr=log_sum_exp_scores,
             grad_target_scores_ptr=grad_target_scores,
@@ -935,6 +969,7 @@ def _rnnt_joint_fused_vocab_bwd_chunked(
             padded_vocab_size=padded_vocab_size,
             blank_id=blank_id,
             USE_HIGH_PRECISION_MM=use_high_precision_mm,
+            MM_FULL_PRECISION=mm_full_precision,
         )
         grad_logits_chunk = grad_logits_buffer[:chunk_size]
         joint_hidden_chunk = joint_hidden_flat[chunk_start : chunk_start + chunk_size].to(grad_logits_dtype)

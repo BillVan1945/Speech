@@ -37,7 +37,14 @@ def rnnt_joint_fused_vocab(
     input_grad_full_precision: bool = False,
     weight_grad_full_precision: bool = False,
     backend: str | TurboTransducerBackend | None = TurboTransducerBackend.TRITON,
+    mm_full_precision: bool = False,
 ):
+    """Compute target/blank log-probabilities without materializing the vocabulary logits.
+
+    BF16 activations use BF16 matmul operands even with FP32 master parameters. ``mm_full_precision=True``
+    promotes operands to FP32; ``use_high_precision_mm=True`` also promotes operands and requests IEEE input
+    precision in Triton. Gradient accumulation precision is controlled separately by the gradient flags.
+    """
     backend = TurboTransducerBackend(backend) if backend is not None else None
 
     if backend is None:
@@ -63,6 +70,7 @@ def rnnt_joint_fused_vocab(
                 use_high_precision_mm=use_high_precision_mm,
                 input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
+                mm_full_precision=mm_full_precision,
             )
         case TurboTransducerBackend.CUTILE:
             if not CUTILE_AVAILABLE:
@@ -78,6 +86,7 @@ def rnnt_joint_fused_vocab(
                 use_high_precision_mm=use_high_precision_mm,
                 input_grad_full_precision=input_grad_full_precision,
                 weight_grad_full_precision=weight_grad_full_precision,
+                mm_full_precision=mm_full_precision,
             )
         case _:
             raise Exception("Not implemented backend")

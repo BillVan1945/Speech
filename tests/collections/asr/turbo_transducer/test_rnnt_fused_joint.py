@@ -76,6 +76,49 @@ def _reference_joint_logprobs(
 @pytest.mark.skipif(not TRITON_AVAILABLE, reason="Triton is not installed")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 class TestRnntJointTriton:
+    @pytest.mark.parametrize("mm_full_precision", [False, True])
+    def test_mixed_precision(self, mm_full_precision):
+        torch.manual_seed(42)
+        encoder = torch.randn(2, 5, 32, device="cuda", dtype=torch.bfloat16)
+        predictor = torch.randn(2, 4, 32, device="cuda", dtype=torch.bfloat16)
+        weight = torch.randn(17, 32, device="cuda")
+        bias = torch.randn(17, device="cuda")
+        targets = torch.randint(0, 16, (2, 3), device="cuda")
+        source_lengths = torch.tensor([5, 3], device="cuda")
+        target_lengths = torch.tensor([3, 1], device="cuda")
+        reference_dtype = torch.float32 if mm_full_precision else torch.bfloat16
+        outputs, gradients = [], []
+        for encoder_value, predictor_value, weight_value in [
+            (encoder.to(reference_dtype), predictor.to(reference_dtype), weight.to(reference_dtype)),
+            (encoder, predictor, weight),
+        ]:
+            inputs = [
+                value.detach().clone().requires_grad_()
+                for value in (encoder_value, predictor_value, weight_value, bias)
+            ]
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                target, blank = rnnt_fused_joint(
+                    encoder_output_projected=inputs[0],
+                    predictor_output_projected=inputs[1],
+                    weight=inputs[2],
+                    bias=inputs[3],
+                    targets=targets,
+                    src_lengths=source_lengths,
+                    tgt_lengths=target_lengths,
+                    blank_id=16,
+                    dropout_p=0.2,
+                    dropout_seed=42,
+                    mm_full_precision=mm_full_precision,
+                )
+            (target.sum() + blank.sum()).backward()
+            outputs.append((target, blank))
+            gradients.append([value.grad for value in inputs])
+        for actual, expected in zip(outputs[1], outputs[0]):
+            torch.testing.assert_close(actual, expected, atol=1e-5, rtol=1e-5)
+        for actual, expected in zip(gradients[1], gradients[0]):
+            torch.testing.assert_close(actual.float(), expected.to(actual.dtype).float(), atol=0.03, rtol=0.02)
+        assert gradients[1][2].dtype == gradients[1][3].dtype == torch.float32
+
     @pytest.mark.parametrize(
         "shape",
         [

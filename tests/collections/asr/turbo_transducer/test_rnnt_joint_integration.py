@@ -44,6 +44,7 @@ def _turbo_kernel_config(kernel_type: str):
         "type": kernel_type,
         "kwargs": {
             "backend": "triton",
+            "mm_full_precision": True,
             "input_grad_full_precision": True,
             "use_high_precision_mm": True,
             "weight_grad_full_precision": True,

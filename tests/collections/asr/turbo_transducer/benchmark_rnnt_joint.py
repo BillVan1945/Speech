@@ -19,6 +19,8 @@ Usage:
     python benchmark_rnnt_joint.py --joint standard --loss turbo_rnnt --dtype bfloat16
     python benchmark_rnnt_joint.py --joint fused --loss turbo_rnnt --dtype bfloat16
     python benchmark_rnnt_joint.py --joint fused_vocab --loss turbo_rnnt --dtype bfloat16
+    python benchmark_rnnt_joint.py --joint fused_vocab --dtype bf16-mixed
+    python benchmark_rnnt_joint.py --joint fused_vocab --dtype bf16-mixed --mm-full-precision
     python benchmark_rnnt_joint.py --joint standard --loss warprnnt_numba --dtype bfloat16
     python benchmark_rnnt_joint.py --joint fused --dtype bfloat16 -fo  # forward only
 
@@ -46,6 +48,7 @@ STANDARD_BACKEND_LABEL = "-"
 VALID_JOINTS = ("standard", "fused_vocab", "fused")
 VALID_JOINT_BACKENDS = ("triton", "cutile")
 VALID_LOSSES = ("warprnnt_numba", "turbo_rnnt")
+VALID_DTYPES = ("float32", "fp32", "bfloat16", "bf16", "bfloat16-mixed", "bf16-mixed")
 
 
 @dataclass
@@ -67,14 +70,19 @@ class BenchmarkResults:
     forward_time_ms: float
     backward_time_ms: float
     total_time_ms: float
+    mm_full_precision: bool = False
+    use_high_precision_mm: bool = False
 
 
-def get_dtype(dtype_str: str) -> torch.dtype:
+def get_dtype(dtype_str: str) -> torch.dtype | str:
+    """Resolve aliases; mixed precision keeps its name to distinguish it from pure BF16."""
     dtype_map = {
         'float32': torch.float32,
         'fp32': torch.float32,
         'bfloat16': torch.bfloat16,
         'bf16': torch.bfloat16,
+        'bfloat16-mixed': 'bfloat16-mixed',
+        'bf16-mixed': 'bfloat16-mixed',
     }
     if dtype_str.lower() not in dtype_map:
         raise ValueError(f"Unsupported dtype: {dtype_str}. Supported: {list(dtype_map.keys())}")
@@ -127,7 +135,7 @@ def _create_standard_joint(
 def run_benchmark(
     joint: str,
     loss: str,
-    dtype: torch.dtype,
+    dtype: torch.dtype | str,
     joint_backend: str | None = None,
     warmup_iters: int = 10,
     bench_iters: int = 100,
@@ -139,8 +147,22 @@ def run_benchmark(
     forward_only: bool = False,
     dropout_p: float = 0.2,
     fused_batch_size: int = 0,
+    mm_full_precision: bool = False,
+    use_high_precision_mm: bool = False,
 ) -> BenchmarkResults:
-    """Run one (joint, joint_backend, loss, vocab) benchmark and return results."""
+    """Benchmark Joint+loss. Mixed precision uses BF16 projected inputs, FP32 parameters and forward autocast.
+
+    Backward runs outside autocast, as in training. ``mm_full_precision`` selects FP32 operands for optimized
+    Joint matmuls; ``use_high_precision_mm`` additionally requests IEEE math in Triton. Standard Joint follows
+    PyTorch's precision settings and does not accept these kernel-specific overrides.
+    """
+    dtype = get_dtype(dtype) if isinstance(dtype, str) else dtype
+    mixed_precision = dtype == "bfloat16-mixed"
+    dtype_str = "bfloat16-mixed" if mixed_precision else str(dtype).removeprefix("torch.")
+    if dtype not in (torch.float32, torch.bfloat16, "bfloat16-mixed"):
+        raise ValueError(f"Unsupported dtype: {dtype}")
+    activation_dtype = torch.bfloat16 if mixed_precision else dtype
+    parameter_dtype = torch.float32 if mixed_precision else dtype
     if joint not in VALID_JOINTS:
         raise ValueError(f"Invalid joint={joint!r}. Expected one of {VALID_JOINTS}.")
     if loss not in VALID_LOSSES:
@@ -153,6 +175,8 @@ def run_benchmark(
         raise ValueError(f"fused_batch_size must not exceed batch_size ({batch_size}), got {fused_batch_size}.")
     if joint != "standard" and fused_batch_size > 0:
         raise ValueError("fused_batch_size is supported only for joint='standard'.")
+    if joint == "standard" and (mm_full_precision or use_high_precision_mm):
+        raise ValueError("Matmul precision overrides are supported only for optimized Joint implementations.")
 
     joint_backend = _normalize_joint_backend(joint, joint_backend)
 
@@ -164,8 +188,10 @@ def run_benchmark(
     torch.cuda.empty_cache()
     baseline_before_inputs = torch.cuda.memory_allocated()
 
-    enc_proj = torch.randn(batch_size, max_time, hidden_dim, device=device, dtype=dtype, requires_grad=True)
-    pred_proj = torch.randn(batch_size, max_target_plus_1, hidden_dim, device=device, dtype=dtype, requires_grad=True)
+    enc_proj = torch.randn(batch_size, max_time, hidden_dim, device=device, dtype=activation_dtype, requires_grad=True)
+    pred_proj = torch.randn(
+        batch_size, max_target_plus_1, hidden_dim, device=device, dtype=activation_dtype, requires_grad=True
+    )
     standard_joint = None
     if joint == "standard":
         standard_joint = _create_standard_joint(
@@ -174,12 +200,12 @@ def run_benchmark(
             dropout_p=dropout_p,
             fused_batch_size=fused_batch_size,
             device=device,
-            dtype=dtype,
+            dtype=parameter_dtype,
         )
         linear = standard_joint.joint_net[-1]
     else:
-        linear = torch.nn.Linear(hidden_dim, vocab_size, device=device, dtype=dtype)
-        linear.weight = torch.nn.Parameter(torch.rand(vocab_size, hidden_dim, device=device, dtype=dtype))
+        linear = torch.nn.Linear(hidden_dim, vocab_size, device=device, dtype=parameter_dtype)
+        linear.weight = torch.nn.Parameter(torch.rand(vocab_size, hidden_dim, device=device, dtype=parameter_dtype))
     targets = torch.randint(0, blank_id, (batch_size, max_targets), device=device, dtype=torch.long)
     src_lengths = torch.full([batch_size], max_time, device=device, dtype=torch.long)
     tgt_lengths = torch.full([batch_size], max_targets, device=device, dtype=torch.long)
@@ -229,6 +255,8 @@ def run_benchmark(
             bias=linear.bias,
             blank_id=blank_id,
             backend=joint_backend,
+            mm_full_precision=mm_full_precision,
+            use_high_precision_mm=use_high_precision_mm,
         )
         loss_batch = rnnt_loss_from_logprobs_triton(
             target_logprobs=target_logprobs,
@@ -250,6 +278,8 @@ def run_benchmark(
             blank_id=blank_id,
             dropout_p=dropout_p,
             backend=joint_backend,
+            mm_full_precision=mm_full_precision,
+            use_high_precision_mm=use_high_precision_mm,
         )
         loss_batch = rnnt_loss_from_logprobs_triton(
             target_logprobs=target_logprobs,
@@ -259,11 +289,15 @@ def run_benchmark(
         )
         return loss_batch.sum()
 
-    run_fwd = {
+    run_fwd_impl = {
         "standard": run_fwd_standard,
         "fused_vocab": run_fwd_fused_vocab,
         "fused": run_fwd_fused,
     }[joint]
+
+    def run_fwd():
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=mixed_precision):
+            return run_fwd_impl()
 
     def clear_grads():
         if enc_proj.grad is not None:
@@ -349,7 +383,6 @@ def run_benchmark(
 
     avg_fwd = sum(forward_times) / len(forward_times)
     avg_bwd = sum(backward_times) / len(backward_times) if backward_times else 0.0
-    dtype_str = 'float32' if dtype == torch.float32 else 'bfloat16'
     return BenchmarkResults(
         joint=joint,
         joint_backend=joint_backend,
@@ -368,6 +401,8 @@ def run_benchmark(
         forward_time_ms=avg_fwd,
         backward_time_ms=avg_bwd,
         total_time_ms=avg_fwd + avg_bwd,
+        mm_full_precision=mm_full_precision,
+        use_high_precision_mm=use_high_precision_mm,
     )
 
 
@@ -397,6 +432,9 @@ TABLE_COLUMNS: tuple[tuple[str, str, callable], ...] = (
     ("Joint Backend", "joint_backend", _fmt_str),
     ("Loss", "loss", _fmt_str),
     ("Fused Batch Size", "fused_batch_size", _fmt_int),
+    ("Dtype", "dtype", _fmt_str),
+    ("MM Full Precision", "mm_full_precision", str),
+    ("High Precision MM", "use_high_precision_mm", str),
     ("Input Memory", "input_memory_gb", _fmt_mem),
     ("Fwd Memory", "forward_memory_gb", _fmt_mem),
     ("Bwd Memory", "backward_peak_memory_gb", _fmt_mem),
@@ -493,8 +531,8 @@ def main():
         '--dtype',
         type=str,
         default='bfloat16',
-        choices=['float32', 'fp32', 'bfloat16', 'bf16'],
-        help='Data type (default: bfloat16)',
+        choices=VALID_DTYPES,
+        help='Mixed precision uses FP32 parameters and BF16 forward autocast (default: bfloat16)',
     )
     parser.add_argument('--batch-size', type=int, default=64)
     parser.add_argument(
@@ -516,6 +554,10 @@ def main():
     )
     parser.add_argument('--no-dropout', action='store_true', help='Disable dropout (enabled by default, p=0.2)')
     parser.add_argument('--csv-output', type=str, default=None, help='Optional path to write CSV')
+    parser.add_argument('--mm-full-precision', action='store_true', help='Use FP32 matmul operands in optimized Joint')
+    parser.add_argument(
+        '--use-high-precision-mm', action='store_true', help='Use FP32 operands and IEEE matmuls in Triton Joint'
+    )
 
     args = parser.parse_args()
 
@@ -545,6 +587,8 @@ def main():
         forward_only=args.forward_only,
         dropout_p=dropout_p,
         fused_batch_size=args.fused_batch_size,
+        mm_full_precision=args.mm_full_precision,
+        use_high_precision_mm=args.use_high_precision_mm,
     )
 
     print(
