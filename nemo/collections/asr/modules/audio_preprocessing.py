@@ -151,10 +151,9 @@ class AudioToMelSpectrogramPreprocessor(AudioPreprocessor, Exportable):
             A normalization block is a module class, a `functools.partial`
             or a config section with `_target_` and `_partial_: true`;
             it is built with `num_features` and called as `block(features, lengths)` on [B, D, T] features,
-            and for the packed front end it also provides `normalize_frames(frames)` on the valid frames [N, D].
-            `FeatureBatchNorm` normalizes per channel / freq
-            with the statistics of the batch's valid frames in training and with running statistics in evaluation,
-            without affine parameters.
+            and for the packed front end it also provides `forward_packed(frames)` on the valid frames [N, D].
+            `MaskedBatchNorm1d` is such a block: batch normalization per channel / freq
+            with the statistics of the batch's valid frames in training and with running statistics in evaluation.
             Defaults to "per_feature"
         n_fft (int): Length of FT window. If None, it uses the smallest power
             of 2 that is larger than n_window_size.

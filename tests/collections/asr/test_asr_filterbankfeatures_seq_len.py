@@ -23,7 +23,8 @@ import torch
 
 from nemo.collections.asr.modules import AudioToMelSpectrogramPreprocessor
 from nemo.collections.asr.modules.audio_preprocessing import AudioToMelSpectrogramPreprocessorConfig
-from nemo.collections.asr.parts.preprocessing.features import FeatureBatchNorm, FilterbankFeatures
+from nemo.collections.asr.parts.preprocessing.features import FilterbankFeatures
+from nemo.collections.asr.parts.submodules.batchnorm import MaskedBatchNorm1d
 
 
 class TestFilterbankFeatures:
@@ -239,43 +240,22 @@ class TestFilterbankFeaturesOptions:
             FilterbankFeatures(log_base=1.0)
 
     @pytest.mark.unit
-    def test_feature_batch_norm_statistics_over_valid_frames(self):
-        torch.manual_seed(3)
-        module = FeatureBatchNorm(4, eps=1e-3, momentum=0.5).train()
-        x = torch.randn(2, 4, 6) * 3 + 1
-        seq_len = torch.tensor([6, 3])
-        x[1, :, 3:] = 1e6  # padding must not enter the statistics
-        out = module(x, seq_len)
-        valid = torch.cat([x[0], x[1, :, :3]], dim=1)
-        mean, var = valid.mean(1), valid.var(1, unbiased=False)
-        torch.testing.assert_close(out[0], (x[0] - mean[:, None]) / torch.sqrt(var[:, None] + 1e-3))
-        torch.testing.assert_close(module.running_mean, 0.5 * mean)
-        torch.testing.assert_close(module.running_var, 0.5 + 0.5 * var)
-        # evaluation uses the running statistics, and the packed entry point agrees with the padded one
-        module.eval()
-        evaluated = module(x, seq_len)
-        expected = (x - module.running_mean[None, :, None]) * torch.rsqrt(module.running_var[None, :, None] + 1e-3)
-        torch.testing.assert_close(evaluated, expected)
-        torch.testing.assert_close(
-            module.normalize_frames(valid.T), torch.cat([evaluated[0], evaluated[1, :, :3]], 1).T
-        )
-        # a batch without valid frames leaves the running statistics unchanged
-        module.train()
-        module(x, torch.tensor([0, 0]))
-        torch.testing.assert_close(module.running_mean, 0.5 * mean)
-        torch.testing.assert_close(module.running_var, 0.5 + 0.5 * var)
-        assert set(module.state_dict()) == {"running_mean", "running_var"}
-
-    @pytest.mark.unit
     def test_batch_norm_in_filterbank_features(self):
         torch.manual_seed(4)
         # the block names what deviates from the module's defaults; the feature count comes from the parent
-        module = FilterbankFeatures(normalize=functools.partial(FeatureBatchNorm, eps=1e-3, momentum=0.1), **PLAIN)
+        block = functools.partial(MaskedBatchNorm1d, eps=1e-3, momentum=0.1, affine=False, unbiased_running_var=False)
+        module = FilterbankFeatures(normalize=block, **PLAIN)
         raw = FilterbankFeatures(normalize=None, **PLAIN).eval()
-        assert set(module.state_dict()) == {"window", "fb", "norm.running_mean", "norm.running_var"}
-        assert isinstance(module.norm, FeatureBatchNorm) and module.norm.num_features == 80
+        assert set(module.state_dict()) == {
+            "window",
+            "fb",
+            "norm.running_mean",
+            "norm.running_var",
+            "norm.num_batches_tracked",
+        }
+        assert isinstance(module.norm, MaskedBatchNorm1d) and module.norm.num_features == 80
         assert module.norm.eps == 1e-3 and module.norm.momentum == 0.1
-        assert FilterbankFeatures(normalize=FeatureBatchNorm, **PLAIN).norm.eps == 1e-5
+        assert FilterbankFeatures(normalize=MaskedBatchNorm1d, **PLAIN).norm.eps == 1e-5
         lengths = torch.tensor([4000, 2500])
         signal = torch.randn(2, 4000) * (torch.arange(4000)[None, :] < lengths[:, None])
         unnormalized, frame_lengths = raw(signal, lengths)
@@ -328,21 +308,23 @@ class TestFilterbankFeaturesOptions:
             log_zero_guard_value=1e-10,
             log_base=10.0,
             normalize={
-                "_target_": "nemo.collections.asr.parts.preprocessing.features.FeatureBatchNorm",
+                "_target_": "nemo.collections.asr.parts.submodules.batchnorm.MaskedBatchNorm1d",
                 "_partial_": True,
                 "eps": 1e-3,
+                "affine": False,
             },
             pad_to=0,
         ).eval()
         featurizer = preprocessor.featurizer
         assert featurizer.snip_edges and featurizer.log_base == 10.0
-        assert isinstance(featurizer.norm, FeatureBatchNorm) and featurizer.norm.eps == 1e-3
+        assert isinstance(featurizer.norm, MaskedBatchNorm1d) and featurizer.norm.eps == 1e-3
         assert torch.equal(featurizer.window, torch.hann_window(400, periodic=True))
         assert set(preprocessor.state_dict()) == {
             "featurizer.window",
             "featurizer.fb",
             "featurizer.norm.running_mean",
             "featurizer.norm.running_var",
+            "featurizer.norm.num_batches_tracked",
         }
         signal = torch.randn(2, 16000)
         lengths = torch.tensor([16000, 8000])
