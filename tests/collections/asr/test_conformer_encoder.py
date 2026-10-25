@@ -377,6 +377,8 @@ class TestConformerBlockComposition:
         layer = encoder.layers[0]
         assert type(layer.feed_forward1).__name__ == "ConformerFeedForward"
         assert type(layer.feed_forward1.activation).__name__ == "Swish"
+        # an activation name resolves through the registry, where 'swish' is nn.SiLU like everywhere else in NeMo
+        assert type(ConformerFeedForward(16, 32, 0.0, activation="swish").activation) is torch.nn.SiLU
         assert layer.feed_forward1.linear1.bias is not None
         assert type(layer.norm_out) is torch.nn.LayerNorm and layer.norm_out.eps == 1e-5
         assert layer.conv.batch_norm.eps == 1e-5

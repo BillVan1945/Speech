@@ -488,8 +488,7 @@ class ConformerFeedForward(nn.Module):
         self.use_bias = use_bias
         self.linear1 = nn.Linear(d_model, d_ff, bias=self.use_bias)
         if isinstance(activation, str):
-            # 'swish' keeps NeMo's Swish class rather than the registry's nn.SiLU alias
-            activation = Swish() if activation == 'swish' else activation_registry[activation]()
+            activation = activation_registry[activation]()
         self.activation = activation
         self.dropout = nn.Dropout(p=dropout)
         self.linear2 = nn.Linear(d_ff, d_model, bias=self.use_bias)
