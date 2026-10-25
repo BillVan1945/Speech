@@ -91,6 +91,28 @@ class TestApplyParamGroupRules:
         assert unmatched == [{'params': tied}]
 
     @pytest.mark.unit
+    def test_second_name_of_a_parameter_within_one_module_counts(self):
+        class Aliased(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.weight = torch.nn.Parameter(torch.zeros(2))
+                self.alias = self.weight
+
+        module = Aliased()
+        groups = apply_param_group_rules(
+            module, [{'params': [module.weight]}], {'rule': {'param_names': ['alias'], 'weight_decay': 0.0}}
+        )
+        assert groups == [{'weight_decay': 0.0, 'params': [module.weight]}]
+
+    @pytest.mark.unit
+    def test_plain_parameters_as_the_optimizer_takes_them(self):
+        network = Network()
+        rules = {'rule': {'param_names': ['*.bias'], 'weight_decay': 0.0}}
+        assert apply_param_group_rules(network, network.parameters(), rules) == apply_param_group_rules(
+            network, [{'params': list(network.parameters())}], rules
+        )
+
+    @pytest.mark.unit
     def test_several_base_groups_and_rule_order(self):
         network = Network()
         groups = apply_param_group_rules(
@@ -147,6 +169,14 @@ class RuledModel(ModelPT):
         return []
 
 
+class FrozenConvModel(RuledModel):
+    """Keeps the convolution out of the optimizer, as models with frozen sub-models do."""
+
+    def setup_optimizer_param_groups(self):
+        frozen = {id(param) for param in self.network.conv.parameters()}
+        self._optimizer_param_groups = [{'params': [p for p in self.parameters() if id(p) not in frozen]}]
+
+
 class TestModelPTParamGroupRules:
     @pytest.mark.unit
     def test_rules_split_the_optimizer_groups(self):
@@ -190,6 +220,39 @@ class TestModelPTParamGroupRules:
         model.setup_optimization()
         assert len(model._optimizer.param_groups) == 1
         assert len(model._optimizer.param_groups[0]['params']) == len(list(model.parameters()))
+
+    @pytest.mark.unit
+    def test_rules_apply_once_in_setup_optimization(self):
+        cfg = OmegaConf.create(
+            {
+                'optim': {'name': 'sgd', 'lr': 0.1},
+                'optim_param_group_rules': {'biases': {'param_names': ['*.bias'], 'weight_decay': 0.0}},
+            }
+        )
+        model = RuledModel(cfg)
+        # the grouping method leaves the rules to `setup_optimization`, so an override keeps its result
+        model.setup_optimizer_param_groups()
+        assert len(model._optimizer_param_groups) == 1
+        model.setup_optimization()
+        assert len(model._optimizer.param_groups) == 2
+
+    @pytest.mark.unit
+    def test_rules_apply_to_an_overridden_grouping(self):
+        cfg = OmegaConf.create(
+            {
+                'optim': {'name': 'adamw', 'lr': 1e-3, 'weight_decay': 0.01},
+                'optim_param_group_rules': {'no_weight_decay': dict(NO_WEIGHT_DECAY, weight_decay=0.0)},
+            }
+        )
+        model = FrozenConvModel(cfg)
+        model.setup_optimization()
+        groups = model._optimizer.param_groups
+        # the frozen convolution stays out, the remaining parameters are split by the rules
+        assert [group['weight_decay'] for group in groups] == [0.0, 0.01]
+        assert [_names(model.network, group) for group in groups] == [
+            ['embedding.weight', 'norm.weight', 'norm.bias', 'hidden.bias'],
+            ['hidden.weight'],
+        ]
 
     @pytest.mark.unit
     def test_optimizer_state_restores_with_unchanged_rules(self):

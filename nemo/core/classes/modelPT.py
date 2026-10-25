@@ -633,6 +633,23 @@ class ModelPT(LightningModule, Model):
     ):
         """Prepares an optimizer from a string name and its optional config parameters.
 
+        The parameter groups come from :meth:`setup_optimizer_param_groups`.
+        With 'optim_param_group_rules' in the model config,
+        parameters are further selected by the type of the module that owns them or by name patterns,
+        and the groups are split with options set on the selected parameters,
+        such as no weight decay for embeddings, norms and biases;
+        see :func:`nemo.core.optim.param_groups.apply_param_group_rules`.
+        The rules apply to the groups of an overridden :meth:`setup_optimizer_param_groups` as well,
+        and a changed rule set changes the optimizer's parameter groups,
+        so an optimizer state saved under other rules does not restore onto them:
+
+        model:
+            optim_param_group_rules:
+                no_weight_decay:
+                    module_types: [torch.nn.Embedding, torch.nn.LayerNorm]
+                    param_names: ["*.bias"]
+                    weight_decay: 0.0
+
         Args:
             optim_config: A dictionary containing the following keys:
 
@@ -650,6 +667,11 @@ class ModelPT(LightningModule, Model):
         """
         # Setup the optimizer parameter groups (by default use all parameters that are trainable)
         self.setup_optimizer_param_groups()
+
+        # Split the groups by the rules of `optim_param_group_rules`, also when a subclass overrides the grouping
+        if self._optimizer_param_groups is not None and self.cfg.get("optim_param_group_rules"):
+            rules = OmegaConf.to_container(self.cfg.optim_param_group_rules, resolve=True)
+            self._optimizer_param_groups = apply_param_group_rules(self, self._optimizer_param_groups, rules)
 
         # Make copy of the config so it can be modified later
         optim_config = self._optim_config_copy(optim_config)
@@ -820,20 +842,8 @@ class ModelPT(LightningModule, Model):
                 lr: 3e-3
                 momentum: 0.9
 
-        Parameters can further be selected by the type of the module that owns them
-        or by name patterns with 'optim_param_group_rules',
-        which splits the groups above and sets options on the selected parameters,
-        such as no weight decay for embeddings, norms and biases;
-        see :func:`nemo.core.optim.param_groups.apply_param_group_rules`.
-        A changed rule set changes the optimizer's parameter groups,
-        so an optimizer state saved under other rules does not restore onto them:
-
-        model:
-            optim_param_group_rules:
-                no_weight_decay:
-                    module_types: [torch.nn.Embedding, torch.nn.LayerNorm]
-                    param_names: ["*.bias"]
-                    weight_decay: 0.0
+        The rules of 'optim_param_group_rules' are not applied here but by :meth:`setup_optimization`
+        on the groups this method sets, so an override keeps its grouping and still gets the rules.
         """
         if not hasattr(self, "parameters"):
             self._optimizer_param_groups = None
@@ -869,10 +879,6 @@ class ModelPT(LightningModule, Model):
                 param_groups = [{"params": other_params}] + param_groups
         else:
             param_groups = [{"params": list(self.parameters())}]
-
-        if "optim_param_group_rules" in self.cfg and self.cfg.optim_param_group_rules:
-            rules = OmegaConf.to_container(self.cfg.optim_param_group_rules, resolve=True)
-            param_groups = apply_param_group_rules(self, param_groups, rules)
 
         self._optimizer_param_groups = param_groups
 

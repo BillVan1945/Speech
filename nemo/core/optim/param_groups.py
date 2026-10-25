@@ -16,7 +16,7 @@
 """Optimizer parameter groups selected by the owning module type or by parameter name."""
 
 import fnmatch
-from typing import Any, Dict, List, Mapping, Sequence, Tuple, Type, Union
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple, Type, Union
 
 import torch
 
@@ -29,7 +29,7 @@ SELECTOR_KEYS = ('module_types', 'param_names')
 
 def apply_param_group_rules(
     module: torch.nn.Module,
-    param_groups: Sequence[Dict[str, Any]],
+    param_groups: Union[Sequence[Dict[str, Any]], Iterable[torch.Tensor]],
     rules: Mapping[str, Mapping[str, Any]],
 ) -> List[Dict[str, Any]]:
     """Split optimizer parameter groups by rules that select parameters and set their group options.
@@ -37,7 +37,7 @@ def apply_param_group_rules(
     A rule selects parameters by the types of the modules that own them
     (``module_types``: classes or import paths; a parameter shared between modules matches when any owner matches)
     or by ``fnmatch`` patterns on their names as :meth:`torch.nn.Module.named_parameters` of ``module`` reports them
-    (``param_names``; every name of a shared parameter counts),
+    (``param_names``; every name of a shared parameter counts, a second name within one module as well),
     and its remaining keys are the options for the selected parameters,
     such as ``weight_decay: 0.0`` or an optimizer-specific flag.
     Each group of ``param_groups`` is split into the parameters no rule selects, which keep the group's options,
@@ -62,16 +62,20 @@ def apply_param_group_rules(
 
     Args:
         module: the module whose parameters the groups hold; it resolves owners and names
-        param_groups: parameter groups as the optimizer takes them
+        param_groups: parameter groups as the optimizer takes them, dicts with ``params`` or plain parameters
         rules: rule name to rule; the name labels the rule in error messages and documentation only
 
     Returns:
         the split parameter groups
     """
+    param_groups = list(param_groups)
+    if param_groups and not isinstance(param_groups[0], dict):
+        param_groups = [{'params': param_groups}]
+
     owners: Dict[int, List[torch.nn.Module]] = {}
     names: Dict[int, List[str]] = {}
     for module_name, owner in module.named_modules(remove_duplicate=False):
-        for param_name, param in owner.named_parameters(recurse=False):
+        for param_name, param in owner.named_parameters(recurse=False, remove_duplicate=False):
             owners.setdefault(id(param), []).append(owner)
             names.setdefault(id(param), []).append(f"{module_name}.{param_name}" if module_name else param_name)
 
