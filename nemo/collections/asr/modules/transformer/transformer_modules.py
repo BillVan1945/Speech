@@ -32,9 +32,10 @@ class RMSNorm(nn.Module):
     """
     Root mean square normalization (Zhang and Sennrich, 2019) with a learned scale and no bias.
 
-    Written with elementary ops in the input dtype so that ONNX export works:
-    ``torch.nn.RMSNorm`` lowers to ``aten::rms_norm``, which the exporter does not support,
-    and dtype casts around the computation leave the legacy exporter's graph with dangling references.
+    Written with elementary ops so that ONNX export works:
+    ``torch.nn.RMSNorm`` lowers to ``aten::rms_norm``, which the exporter does not support.
+    The mean square is accumulated in float32, as ``torch.nn.functional.rms_norm`` does for half inputs,
+    and only the scale is cast back to the input dtype, which the output keeps.
     The state is ``weight``, as in ``torch.nn.RMSNorm``.
 
     Args:
@@ -48,8 +49,9 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(normalized_shape))
 
     def forward(self, x):
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        return x * torch.rsqrt(variance + self.eps) * self.weight
+        # in float16 the squares overflow from magnitude 256 on, so the mean square is taken in float32
+        variance = x.float().pow(2).mean(dim=-1, keepdim=True)
+        return x * torch.rsqrt(variance + self.eps).to(x.dtype) * self.weight
 
 
 class FixedPositionalEncoding(nn.Module):

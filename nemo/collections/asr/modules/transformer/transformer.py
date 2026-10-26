@@ -24,6 +24,7 @@ from nemo.collections.asr.modules.transformer.encoder_module import EncoderModul
 from nemo.collections.asr.modules.transformer.transformer_decoders import TransformerDecoder, TransformerDecoderAdapter
 from nemo.collections.asr.modules.transformer.transformer_encoders import TransformerEncoder
 from nemo.collections.asr.modules.transformer.transformer_modules import TransformerEmbedding
+from nemo.collections.asr.parts.submodules.multi_head_attention import RotaryPositionalEncoding
 from nemo.collections.asr.parts.utils import adapter_utils
 from nemo.collections.common.parts.utils import ModuleBlock, build_module
 from nemo.core.classes.common import typecheck
@@ -324,6 +325,12 @@ class TransformerDecoderNM(DecoderModule, Exportable):
     def _prepare_for_export(self, **kwargs):
         self._decoder.diagonal = None
         self.return_mems = True
+        # rotary tables grow with the key length in eager mode but are constants in the exported graph,
+        # so they cover every position the decoder supports before the example is traced
+        sample = next(self.parameters())
+        for module in self._decoder.modules():
+            if isinstance(module, RotaryPositionalEncoding):
+                module.extend_pe(self.max_sequence_length, sample.device, sample.dtype)
         super()._prepare_for_export(**kwargs)
 
     @property

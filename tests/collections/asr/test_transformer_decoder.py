@@ -144,6 +144,67 @@ class TestTransformerDecoderBlockComposition:
         assert list(norm.state_dict()) == ["weight"]
 
     @pytest.mark.unit
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_rms_norm_half_precision(self, dtype):
+        # the mean square must not overflow: 1000 squared is outside the float16 range
+        norm = RMSNorm(8, eps=1e-6).to(dtype)
+        large = torch.full((2, 8), 1000.0, dtype=dtype)
+        torch.testing.assert_close(norm(large), torch.ones_like(large))
+        # forward and backward against the float32 computation; mixed signs, a zero row, a non-unit weight
+        torch.manual_seed(0)
+        x32 = torch.randn(5, 8) * 300.0
+        x32[2] = 0.0
+        w32 = torch.randn(8)
+        norm.weight.data = w32.to(dtype)
+        x = x32.to(dtype).requires_grad_()
+        out = norm(x)
+        assert out.dtype == dtype
+        out.sum().backward()
+        reference = RMSNorm(8, eps=1e-6)
+        reference.weight.data = w32.clone()
+        x_ref = x32.clone().requires_grad_()
+        expected = reference(x_ref)
+        expected.sum().backward()
+        torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=5e-2)
+        torch.testing.assert_close(x.grad.float(), x_ref.grad, rtol=2e-2, atol=5e-2)
+        torch.testing.assert_close(norm.weight.grad.float(), reference.weight.grad, rtol=2e-2, atol=5e-2)
+
+    @pytest.mark.unit
+    def test_export_covers_rotary_positions_beyond_the_example(self, tmp_path):
+        # the exported graph holds the rotary table as a constant,
+        # so it must cover every position the decoder supports, not only the example's key length
+        decoder = _composed_decoder(max_sequence_length=8)
+        for parameter in decoder.parameters():
+            parameter.data.normal_(0, 0.3)
+
+        def example(length):
+            torch.manual_seed(length)
+            input_ids = torch.randint(0, 11, (1, length))
+            decoder_mask = torch.ones(1, length, dtype=torch.int64)
+            encoder_states = torch.randn(1, 9, 16)
+            encoder_mask = torch.ones(1, 9, dtype=torch.int64)
+            decoder_mems = torch.randn(1, decoder.num_states, length - 1, 16)
+            return input_ids, decoder_mask, encoder_states, encoder_mask, decoder_mems
+
+        path = str(tmp_path / "decoder.ts")
+        decoder.export(path, input_example=example(4), check_trace=False)
+        exported = torch.jit.load(path)
+        for length in (4, 5, 8):
+            input_ids, decoder_mask, encoder_states, encoder_mask, decoder_mems = example(length)
+            with torch.no_grad():
+                # export switched the module to returning the states of every layer, as the graph does
+                expected = decoder(
+                    input_ids=input_ids,
+                    decoder_mask=decoder_mask,
+                    encoder_embeddings=encoder_states,
+                    encoder_mask=encoder_mask,
+                    decoder_mems=decoder_mems,
+                )
+            torch.testing.assert_close(
+                exported(input_ids, decoder_mask, encoder_states, encoder_mask, decoder_mems), expected
+            )
+
+    @pytest.mark.unit
     def test_gated_feed_forward(self):
         torch.manual_seed(0)
         ff = GatedPositionWiseFF(16, 24)
