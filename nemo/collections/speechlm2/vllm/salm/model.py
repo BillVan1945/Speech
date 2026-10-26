@@ -73,7 +73,6 @@ from nemo.collections.speechlm2.vllm.salm.ctc_timestamps import (
     install_worker_methods,
     read_speaker_prior_weight,
     register_aligner,
-    require_v1_model_runner,
     store_alignment_states,
     take_step_hashes,
     tokenizer_special_tokens,
@@ -216,7 +215,7 @@ class NeMoSpeechLMForConditionalGeneration(
         from nemo.collections.speechlm2.parts.ctc_timestamp_utils import get_ctc_timestamp_aligner
         from nemo.collections.speechlm2.vllm.salm.ctc_timestamps import install_encoder_cache_binding
 
-        unavailable = self._ctc_timestamps_unavailable(vllm_config)
+        unavailable = self._ctc_timestamps_unavailable()
         if unavailable is not None:
             if not (isinstance(ctc_config, dict) and ctc_config.get("optional")):
                 raise ValueError(unavailable)
@@ -236,10 +235,10 @@ class NeMoSpeechLMForConditionalGeneration(
         aligner.speaker_logprob_weight = speaker_prior_weight
 
         register_aligner(aligner, tokenizer_special_tokens(vllm_config.model_config))
-        install_encoder_cache_binding()
+        install_encoder_cache_binding(getattr(vllm_config, "use_v2_model_runner", False))
         logging.info("[NeMoSpeechLM] CTC timestamps enabled from checkpoint config: %s", adapter_path)
 
-    def _ctc_timestamps_unavailable(self, vllm_config: VllmConfig) -> str | None:
+    def _ctc_timestamps_unavailable(self) -> str | None:
         """Why this engine cannot produce CTC timestamps, or ``None`` when it can."""
         encoder = self.perception.encoder
         if not getattr(encoder, "supports_ctc_timestamp_inputs", False):
@@ -251,10 +250,6 @@ class NeMoSpeechLMForConditionalGeneration(
                 "CTC timestamps need one unchunked encoder forward, but encoder_chunk_size_seconds="
                 f"{self.encoder_chunk_size_seconds} is set."
             )
-        try:
-            require_v1_model_runner(vllm_config)
-        except ValueError as error:
-            return str(error)
         return None
 
     # ── language-model integration ──
