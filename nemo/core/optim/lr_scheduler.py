@@ -880,8 +880,12 @@ def prepare_lr_scheduler(
             else:
                 scheduler_params_name = scheduler_args['name']
 
-            # Get override arguments provided in the config yaml file / Dict Config
-            scheduler_params_override = scheduler_args.get('params', {})
+            # Get override arguments provided in the config yaml file / Dict Config,
+            # under `params`, or next to `name` once `maybe_update_config_version` has flattened `params`
+            if 'params' in scheduler_args:
+                scheduler_params_override = scheduler_args['params']
+            else:
+                scheduler_params_override = {key: value for key, value in scheduler_args.items() if key != 'name'}
 
             # If params is itself a dict config object provided explicitly in Dict Config
             # Resolve to dictionary for convenience
