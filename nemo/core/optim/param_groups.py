@@ -47,7 +47,9 @@ def apply_param_group_rules(
     and empty groups are dropped.
     The rules decide the optimizer's parameter groups:
     a changed rule set changes their membership and order,
-    so an optimizer state saved under other rules (a training checkpoint) does not restore onto them.
+    so an optimizer state saved under other rules (a training checkpoint) fails to load,
+    or loads onto other parameters when the group counts and sizes still match;
+    keep the rules unchanged when resuming.
 
     Example::
 

@@ -441,7 +441,9 @@ so a model that overrides the grouping, for example to keep frozen modules out o
 keeps its groups and gets the rules.
 The rules decide the optimizer's parameter groups:
 a changed rule set changes their membership and order,
-so an optimizer state saved under other rules (a training checkpoint) does not restore onto them.
+so an optimizer state saved under other rules (a training checkpoint) fails to load,
+or loads onto other parameters when the group counts and sizes still match;
+keep the rules unchanged when resuming.
 See :func:`nemo.core.optim.param_groups.apply_param_group_rules`.
 
 .. _optimizers-label:

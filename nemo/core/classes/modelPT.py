@@ -641,7 +641,9 @@ class ModelPT(LightningModule, Model):
         see :func:`nemo.core.optim.param_groups.apply_param_group_rules`.
         The rules apply to the groups of an overridden :meth:`setup_optimizer_param_groups` as well,
         and a changed rule set changes the optimizer's parameter groups,
-        so an optimizer state saved under other rules does not restore onto them:
+        so an optimizer state saved under other rules fails to load,
+        or loads onto other parameters when the group counts and sizes still match;
+        keep the rules unchanged when resuming:
 
         model:
             optim_param_group_rules:

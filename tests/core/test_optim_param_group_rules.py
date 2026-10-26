@@ -297,7 +297,7 @@ class TestModelPTParamGroupRules:
         assert [group['weight_decay'] for group in continued._optimizer.param_groups] == [0.0, 0.01]
         assert len(continued._optimizer.state) == len(list(model.parameters()))
 
-        # other rules give other groups, and the saved state no longer fits them
+        # other rules give other groups: the saved state no longer fits groups of other sizes
         changed = OmegaConf.create(
             {
                 'optim': {'name': 'adamw', 'lr': 1e-3, 'weight_decay': 0.01},
@@ -310,6 +310,25 @@ class TestModelPTParamGroupRules:
         other.setup_optimization()
         with pytest.raises(ValueError, match="parameter group"):
             other._optimizer.load_state_dict(state)
+
+        # and it loads onto groups of the same sizes, with the state on other parameters
+        changed = OmegaConf.create(
+            {
+                'optim': {'name': 'adamw', 'lr': 1e-3, 'weight_decay': 0.01},
+                'optim_param_group_rules': {
+                    'first_modules': {
+                        'param_names': ['network.embedding.*', 'network.norm.*', 'network.conv.*'],
+                        'weight_decay': 0.0,
+                    }
+                },
+            }
+        )
+        shifted = RuledModel(changed)
+        shifted.setup_optimization()
+        assert [len(group['params']) for group in shifted._optimizer.param_groups] == [5, 2]
+        shifted._optimizer.load_state_dict(state)
+        hidden = shifted.network.hidden
+        assert shifted._optimizer.state[hidden.bias]['exp_avg'].shape == hidden.weight.shape
 
 
 class TestConformerParamGroupRules:
