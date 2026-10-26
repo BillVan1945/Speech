@@ -100,7 +100,8 @@ def capture_cuda_graph(fn: Callable[[], Any], pool=None) -> tuple[torch.cuda.CUD
     Capture ``fn()`` into a CUDA graph and return the graph with the outputs of the captured call.
 
     ``fn`` first runs once eagerly on a side stream, so lazy initialization (compilation, autotuning, library
-    workspaces) happens outside the capture, and garbage collection is paused during the capture. Every replay of the graph rewrites the returned outputs in place.
+    workspaces) happens outside the capture, and garbage collection is paused during the capture. Every replay of the
+    graph rewrites the returned outputs in place.
 
     Args:
         fn: Callable to capture; it reads its inputs from tensors that callers update before each replay.
