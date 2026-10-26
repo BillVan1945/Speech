@@ -238,6 +238,11 @@ class EasyMagpieTTSInferenceModel(ModelPT):
     """
 
     def __init__(self, cfg: DictConfig, trainer: 'Trainer' = None):
+        # Nested codec restoration clears NeMo's global restore flag. Capture
+        # the parent state before it so fine-tuned HF weights are never reloaded.
+        restoring_hf_decoder = cfg.get('transformer_hf_load_pretrained_weights', False) and (
+            self._is_model_being_restored()
+        )
         self.world_size = 1
         if trainer is not None:
             self.world_size = trainer.num_nodes * trainer.num_devices
@@ -493,9 +498,30 @@ class EasyMagpieTTSInferenceModel(ModelPT):
 
         # Decoder backend selection - supports HuggingFace models or NemotronH
         self.decoder_type = cfg.get('decoder_type', 'huggingface')  # backward compatible default
+        load_hf_pretrained = cfg.get('transformer_hf_load_pretrained_weights', False)
+        if load_hf_pretrained and self.decoder_type != 'huggingface':
+            raise ValueError('transformer_hf_load_pretrained_weights requires decoder_type=huggingface')
         logging.info(f"Using decoder type: {self.decoder_type}")
 
-        if self.decoder_type == 'huggingface':
+        if self.decoder_type == 'huggingface' and load_hf_pretrained:
+            from nemo.collections.tts.modules.pretrained_hf_decoder import initialize_pretrained_hf_decoder
+
+            hf_transformer, self.transformer_backend_config = initialize_pretrained_hf_decoder(
+                self.cfg, self.tokenizer, self.text_vocab_size, restoring=restoring_hf_decoder
+            )
+            if self.disable_lm_text_head:
+                hf_transformer.lm_head = None
+            self.decoder = hf_transformer.model
+            self.lm_text_head = None if self.disable_lm_text_head else hf_transformer.lm_head
+            # Match new phoneme-channel inputs to the pretrained text embedding scale.
+            # The phoneme output vocabulary/head remains a newly trained TTS task.
+            for embedding in getattr(self, 'phoneme_embeddings', []):
+                nn.init.normal_(embedding.weight, std=self.transformer_backend_config.initializer_range)
+            logging.info(
+                f"HF decoder: {cfg.transformer_hf_backend}; pretrained initialization={not restoring_hf_decoder}"
+            )
+
+        elif self.decoder_type == 'huggingface':
             # Existing HuggingFace path
             self.transformer_backend_config = AutoConfig.from_pretrained(
                 cfg.transformer_hf_backend,
@@ -559,6 +585,8 @@ class EasyMagpieTTSInferenceModel(ModelPT):
             # Keep decoder without token embedding parameters when text is CAS-only.
             self.text_embedding = None
             self.decoder.set_input_embeddings(None)
+        elif load_hf_pretrained:
+            self.text_embedding = self.decoder.get_input_embeddings()
         else:
             self.text_embedding = nn.Embedding(self.text_vocab_size, cfg.embedding_dim)
             self.decoder.set_input_embeddings(self.text_embedding)

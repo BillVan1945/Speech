@@ -18,6 +18,12 @@ model:
   
   # HuggingFace backend config (used when decoder_type: "huggingface")
   transformer_hf_backend: "Qwen/Qwen2.5-1.5B"
+  # Opt in to pretrained decoder AND text embedding weights; false preserves random initialization.
+  transformer_hf_load_pretrained_weights: false
+  transformer_hf_revision: null
+  transformer_hf_attn_implementation: null
+  # Populated on pretrained initialization so .nemo restoration needs no original LLM weights.
+  transformer_hf_config: null
   
   # NemotronH config (used when decoder_type: "nemotron_h")
   # Hybrid Mamba2/MoE/Attention model (~3B total, ~600-800M active). Layer types via hybrid_override_pattern:

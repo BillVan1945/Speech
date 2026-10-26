@@ -1,0 +1,27 @@
+# Qwen-initialized text-to-phoneme frontend. Supply your text-only train/val data,
+# codec artifact and IPA tokenizer as in the existing frontend training recipe.
+defaults:
+  - easy_magpietts_lhotse_multiturn
+  - _self_
+
+model:
+  decoder_type: huggingface
+  transformer_hf_backend: Qwen/Qwen3-0.6B
+  transformer_hf_load_pretrained_weights: true
+  transformer_hf_attn_implementation: sdpa
+  embedding_dim: 1024
+  hidden_dim: 1024
+  audio_embedding_dim: 1024
+  use_bpe_char_tokenizer: false
+  disable_subword_embedding: false
+  disable_lm_text_head: true
+  local_transformer_type: none
+  local_transformer_hidden_dim: 1024
+  local_transformer_n_heads: 8
+  use_speaker_encoder: false
+  speaker_encoder_n_heads: 8
+  # Retain this routing key for existing manifest tokenizer_names; IDs are Qwen's.
+  text_tokenizers:
+    nemotron_nano_30b:
+      _target_: AutoTokenizer
+      pretrained_model: ${model.transformer_hf_backend}
