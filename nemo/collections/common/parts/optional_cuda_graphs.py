@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import abc
+import gc
 import math
 from typing import Any, Callable, Optional
 
@@ -99,7 +100,7 @@ def capture_cuda_graph(fn: Callable[[], Any], pool=None) -> tuple[torch.cuda.CUD
     Capture ``fn()`` into a CUDA graph and return the graph with the outputs of the captured call.
 
     ``fn`` first runs once eagerly on a side stream, so lazy initialization (compilation, autotuning, library
-    workspaces) happens outside the capture. Every replay of the graph rewrites the returned outputs in place.
+    workspaces) happens outside the capture, and garbage collection is paused during the capture. Every replay of the graph rewrites the returned outputs in place.
 
     Args:
         fn: Callable to capture; it reads its inputs from tensors that callers update before each replay.
@@ -111,8 +112,16 @@ def capture_cuda_graph(fn: Callable[[], Any], pool=None) -> tuple[torch.cuda.CUD
         fn()
     torch.cuda.current_stream().wait_stream(side)
     graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph, pool=pool):
-        outputs = fn()
+    # A garbage collection during the capture can destroy unreachable CUDAGraph objects, and destroying a graph while
+    # another one is being captured invalidates the capture.
+    gc_was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with torch.cuda.graph(graph, pool=pool):
+            outputs = fn()
+    finally:
+        if gc_was_enabled:
+            gc.enable()
     return graph, outputs
 
 

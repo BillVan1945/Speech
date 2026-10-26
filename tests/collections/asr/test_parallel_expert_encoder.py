@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import gc
 import importlib.util
 import io
 import tarfile
@@ -41,6 +42,7 @@ from nemo.collections.asr.modules.parallel_expert_encoder import (
 from nemo.collections.asr.modules.transformer_encoder import TransformerEncoder
 from nemo.collections.asr.parts.packed_sequence import pack_encoder_output, unpack_encoder_output
 from nemo.collections.asr.parts.preprocessing.features import normalize_batch, normalize_packed_batch
+from nemo.collections.common.parts.optional_cuda_graphs import capture_cuda_graph
 from nemo.collections.speechlm2.parts import ctc_timestamp_utils
 from nemo.collections.speechlm2.parts.ctc_timestamp_utils import (
     CTCTimestampArtifact,
@@ -2864,6 +2866,31 @@ def test_timestamp_state_comparison_respects_storage_precision(dtype, delta, mat
     else:
         with pytest.raises(AssertionError, match="asr_encoded"):
             _assert_states_match(states(0.75), states(0.75 + delta))
+
+
+@pytest.mark.unit
+def test_capture_survives_garbage_collection_of_leaked_graphs():
+    """Cyclic garbage holding an old CUDAGraph must not be destroyed, and so invalidate the capture, mid-capture."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    x = torch.zeros(4, device="cuda")
+    leaked_graph, _ = capture_cuda_graph(lambda: x + 1)
+    leaked = [leaked_graph]
+    leaked.append(leaked)
+    del leaked_graph, leaked
+
+    def churn_allocations_while_capturing():
+        if torch.cuda.is_current_stream_capturing():
+            assert not gc.isenabled()
+            for _ in range(100_000):
+                cycle = []
+                cycle.append(cycle)
+        return x * 2
+
+    graph, out = capture_cuda_graph(churn_allocations_while_capturing)
+    assert gc.isenabled()
+    graph.replay()
+    torch.testing.assert_close(out, x * 2)
 
 
 @pytest.mark.unit
