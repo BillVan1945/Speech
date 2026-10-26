@@ -255,7 +255,7 @@ class TestFilterbankFeaturesOptions:
         }
         assert isinstance(module.norm, MaskedBatchNorm1d) and module.norm.num_features == 80
         assert module.norm.eps == 1e-3 and module.norm.momentum == 0.1
-        assert FilterbankFeatures(normalize=MaskedBatchNorm1d, **PLAIN).norm.eps == 1e-5
+        assert FilterbankFeatures(normalize=MaskedBatchNorm1d, use_grads=True, **PLAIN).norm.eps == 1e-5
         lengths = torch.tensor([4000, 2500])
         signal = torch.randn(2, 4000) * (torch.arange(4000)[None, :] < lengths[:, None])
         unnormalized, frame_lengths = raw(signal, lengths)
@@ -276,6 +276,40 @@ class TestFilterbankFeaturesOptions:
             packed.data[: dense_lengths[0]], dense[0, :, : dense_lengths[0]].T, atol=1e-4, rtol=1e-4
         )
         assert dense[1, :, dense_lengths[1] :].abs().sum() == 0
+
+    @pytest.mark.unit
+    def test_trainable_block_needs_grads(self):
+        # a block with trainable parameters makes no sense in a featurizer that runs without gradients
+        with pytest.raises(ValueError, match="trainable parameters"):
+            FilterbankFeatures(normalize=MaskedBatchNorm1d, **PLAIN)
+        with pytest.raises(ValueError, match="trainable parameters"):
+            AudioToMelSpectrogramPreprocessor(
+                normalize={
+                    "_target_": "nemo.collections.asr.parts.submodules.batchnorm.MaskedBatchNorm1d",
+                    "_partial_": True,
+                }
+            )
+        # with gradients, the loss reaches the block's parameters and the waveform, dense and packed
+        torch.manual_seed(6)
+        lengths = torch.tensor([4000, 2500])
+        signal = torch.randn(2, 4000) * (torch.arange(4000)[None, :] < lengths[:, None])
+        signal.requires_grad_()
+        module = FilterbankFeatures(normalize=MaskedBatchNorm1d, use_grads=True, **PLAIN).train()
+        features, frame_lengths = module(signal, lengths)
+        assert features.requires_grad
+        weights = torch.randn_like(features)
+        (features * weights).sum().backward()
+        for gradient in (module.norm.weight.grad, module.norm.bias.grad, signal.grad):
+            assert gradient is not None and torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+        # the bias gradient is the sum of the weights on the valid frames
+        valid = torch.arange(features.shape[2])[None, :] < frame_lengths[:, None]
+        torch.testing.assert_close(module.norm.bias.grad, (weights * valid[:, None, :]).sum((0, 2)))
+        module.zero_grad()
+        signal.grad = None
+        packed = module.forward_packed(*_pack(signal, lengths))
+        (packed.data * torch.randn_like(packed.data)).sum().backward()
+        for gradient in (module.norm.weight.grad, module.norm.bias.grad, signal.grad):
+            assert gradient is not None and torch.isfinite(gradient).all() and gradient.abs().sum() > 0
 
     @pytest.mark.unit
     def test_normalize_values(self):

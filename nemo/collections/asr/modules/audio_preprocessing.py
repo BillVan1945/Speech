@@ -154,6 +154,9 @@ class AudioToMelSpectrogramPreprocessor(AudioPreprocessor, Exportable):
             and for the packed front end it also provides `forward_packed(frames)` on the valid frames [N, D].
             `MaskedBatchNorm1d` is such a block: batch normalization per channel / freq
             with the statistics of the batch's valid frames in training and with running statistics in evaluation.
+            The preprocessor computes its features without gradients,
+            so a block with trainable parameters is rejected at construction;
+            `MaskedBatchNorm1d` therefore needs `affine: false` here.
             Defaults to "per_feature"
         n_fft (int): Length of FT window. If None, it uses the smallest power
             of 2 that is larger than n_window_size.

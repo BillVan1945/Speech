@@ -403,6 +403,13 @@ class FilterbankFeatures(nn.Module):
         self.norm = None
         if callable(normalize) or (isinstance(normalize, Mapping) and "_target_" in normalize):
             self.norm = build_module(normalize, num_features=nfilt * frame_splicing)
+            if not use_grads and any(parameter.requires_grad for parameter in self.norm.parameters()):
+                raise ValueError(
+                    f"{self} received normalize={normalize!r}, a block with trainable parameters, "
+                    "but computes its features without gradients (use_grads=False), so they could never train; "
+                    "configure the block without trainable parameters (MaskedBatchNorm1d: affine=False), "
+                    "or set use_grads=True."
+                )
         elif isinstance(normalize, Mapping):
             if "fixed_mean" not in normalize or "fixed_std" not in normalize:
                 raise ValueError(
