@@ -173,7 +173,8 @@ class ConvSubsampling(torch.nn.Module):
     Striding Subsampling: "Speech-Transformer: A No-Recurrence Sequence-to-Sequence Model for Speech Recognition" by Linhao Dong et al. (https://ieeexplore.ieee.org/document/8462506)
     Args:
         subsampling (str): The subsampling technique from {"vggnet", "striding", "dw-striding"}
-        subsampling_factor (int): The subsampling factor which should be a power of 2
+        subsampling_factor (int): The subsampling factor, a power of 2 for the default layout;
+            with `conv_strides`, the product of the per-stage time strides
         subsampling_conv_chunking_factor (int): Input chunking factor which can be -1 (no chunking)
         1 (auto) or a power of 2. Default is 1
         feat_in (int): size of the input features
@@ -570,11 +571,12 @@ class ConvSubsampling(torch.nn.Module):
         return [0, self.subsampling_factor + 1]
 
     def _first_conv_output_numel(self, x):
-        """Element count of the first conv's output, the largest activation in the stack.
+        """Element count of the first conv's output, the largest activation of the default stacks.
 
         ``x`` is the ``(B, T, F)`` input before the channel dim is added. Only valid for the
         strided 'striding'/'dw_striding' variants; 'vgg' starts with stride-1 convs, so its
         largest activation is not bounded by this estimate.
+        With per-stage strides a later conv can be larger, see ``_max_conv_numel``.
         """
         b, t, f = x.size()
         pad = (self._left_padding, self._right_padding)
@@ -586,6 +588,28 @@ class ConvSubsampling(torch.nn.Module):
             out_t = calculate_conv_output_size(t, self._kernel_size, self._stride, pad)
             out_f = calculate_conv_output_size(f, self._kernel_size, self._stride, pad)
         return b * self._conv_channels * out_t * out_f
+
+    def _max_conv_numel(self, x):
+        """Largest element count among the conv input and every conv output of the stack.
+
+        The 32-bit indexing guard and the automatic chunking bound the batch by this count.
+        With per-stage strides and channels a later conv can hold more elements than the first,
+        when its channels grow faster than the strides and pools shrink the map,
+        so the stages are walked one by one; the default stacks keep the first-conv estimate.
+        """
+        b, t, f = x.size()
+        largest = b * t * f
+        if self._time_strides is None:
+            return max(largest, self._first_conv_output_numel(x))
+        pad = (self._left_padding, self._right_padding)
+        convs = (layer for layer in self.conv if isinstance(layer, torch.nn.Conv2d))
+        for conv, stride, pool in zip(convs, self._time_strides, self._freq_pools):
+            t = calculate_conv_output_size(t, self._kernel_size, stride, pad)
+            f = calculate_conv_output_size(f, self._kernel_size, 1, pad)
+            # the conv output is counted before the pool that follows it
+            largest = max(largest, b * conv.out_channels * t * f)
+            f //= pool
+        return largest
 
     def forward(self, x, lengths):
         if self._time_strides is not None:
@@ -619,11 +643,8 @@ class ConvSubsampling(torch.nn.Module):
                 # avoiding a bug / feature limiting indexing of tensors to 2**31
                 # see https://github.com/pytorch/pytorch/issues/80020
                 # Split on '>=': at equality the tensor already holds INT_MAX elements, the
-                # value that trips canUse32BitIndexMath. Guard the conv input and its output.
-                need_to_split = (
-                    self._first_conv_output_numel(x) >= _MAX_CONV_NUMEL_32BIT
-                    or torch.numel(x) >= _MAX_CONV_NUMEL_32BIT
-                )
+                # value that trips canUse32BitIndexMath. Guard the conv input and every conv output.
+                need_to_split = self._max_conv_numel(x) >= _MAX_CONV_NUMEL_32BIT
             else:
                 # if subsampling_conv_chunking_factor > 1 we always split
                 need_to_split = True
@@ -689,8 +710,8 @@ class ConvSubsampling(torch.nn.Module):
             # avoiding a bug / feature limiting indexing of tensors to 2**31
             # see https://github.com/pytorch/pytorch/issues/80020
             # Smallest power-of-two split with each chunk strictly below the limit (+1 forces
-            # strict); size against the larger of conv input and first-conv output.
-            numel = max(self._first_conv_output_numel(x), torch.numel(x))
+            # strict); size against the largest of conv input and conv outputs.
+            numel = self._max_conv_numel(x)
             cf = 2 ** math.ceil(math.log(numel // _MAX_CONV_NUMEL_32BIT + 1, 2))
             logging.debug(f'using auto set chunking factor: {cf}')
 
@@ -698,7 +719,7 @@ class ConvSubsampling(torch.nn.Module):
         if new_batch_size == 0:
             # If cf > b and one sample fits, use single-sample batches rather than the channel
             # fallback (which runs the full first conv up front).
-            if max(self._first_conv_output_numel(x[:1]), torch.numel(x[:1])) >= _MAX_CONV_NUMEL_32BIT:
+            if self._max_conv_numel(x[:1]) >= _MAX_CONV_NUMEL_32BIT:
                 return x, lengths, False
             new_batch_size = 1
 

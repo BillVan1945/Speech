@@ -343,8 +343,74 @@ class TestConvSubsamplingStrides:
             out, out_lengths = module(x=features, lengths=lengths)
         assert out.shape == (3, 17, 256) and out_lengths.tolist() == [17, 12, 3]
         assert module.out.weight.shape == (256, 64 * 40)
-        # the 32-bit indexing guard counts the first convolution's output elements
-        assert module._first_conv_output_numel(features) == module.conv[0](features.unsqueeze(1)).numel()
+        # the 32-bit indexing guard counts the first convolution's output elements,
+        # which in this configuration is the largest activation of the stack
+        first_conv_numel = module.conv[0](features.unsqueeze(1)).numel()
+        assert module._first_conv_output_numel(features) == first_conv_numel
+        assert module._max_conv_numel(features) == first_conv_numel
+
+    @pytest.mark.unit
+    def test_max_conv_numel_counts_every_stage(self):
+        # channels 2 then 8 with time strides 2, 1 and no pooling: the second convolution's output
+        # is four times the first one's, so the first-conv estimate alone would under-count the stack
+        module = _build_strided_conv_subsampling(
+            subsampling_factor=2, conv_channels=[2, 8], conv_strides=[2, 1], freq_pools=[1, 1]
+        )
+        features = torch.randn(4, 50, 8)
+        activation_numels = [features.numel()]
+        x = features.unsqueeze(1)
+        with torch.no_grad():
+            for layer in module.conv:
+                x = layer(x)
+                if isinstance(layer, torch.nn.Conv2d):
+                    activation_numels.append(x.numel())
+        assert activation_numels == [1600, 1600, 6400]
+        assert module._max_conv_numel(features) == max(activation_numels)
+        assert module._first_conv_output_numel(features) == 1600
+        # a frequency pool after the first stage halves the second convolution's map
+        pooled = _build_strided_conv_subsampling(
+            subsampling_factor=2, conv_channels=[2, 8], conv_strides=[2, 1], freq_pools=[2, 1]
+        )
+        assert pooled._max_conv_numel(features) == 3200
+
+    @pytest.mark.unit
+    def test_guard_splits_when_a_later_convolution_is_largest(self, monkeypatch):
+        torch.manual_seed(0)
+        module = _build_strided_conv_subsampling(
+            subsampling_factor=2, conv_channels=[2, 8], conv_strides=[2, 1], freq_pools=[1, 1]
+        )
+        features = torch.randn(4, 50, 8)
+        lengths = torch.tensor([50, 31, 50, 12])
+        with torch.no_grad():
+            reference, reference_lengths = module(x=features, lengths=lengths)
+        # the limit sits at the second convolution's output, above the input and the first output
+        limit = module._max_conv_numel(features)
+        assert limit > max(features.numel(), module._first_conv_output_numel(features))
+        monkeypatch.setattr(subsampling_module, "_MAX_CONV_NUMEL_32BIT", limit)
+        split_calls = _install_split_spy(monkeypatch, module)
+        chunk_batches = []
+        original_forward = module.conv.forward
+
+        def recording_forward(inp, lens):
+            chunk_batches.append(int(inp.shape[0]))
+            return original_forward(inp, lens)
+
+        monkeypatch.setattr(module.conv, "forward", recording_forward)
+        with torch.no_grad():
+            out, out_lengths = module(x=features, lengths=lengths)
+        assert split_calls == [4] and chunk_batches == [2, 2]
+        for chunk_batch in chunk_batches:
+            assert module._max_conv_numel(features[:chunk_batch]) < limit
+        torch.testing.assert_close(out, reference, atol=1e-5, rtol=1e-5)
+        assert out_lengths.tolist() == reference_lengths.tolist()
+        # with a frequency pool after the first stage the stack stays below the same limit: no split
+        pooled = _build_strided_conv_subsampling(
+            subsampling_factor=2, conv_channels=[2, 8], conv_strides=[2, 1], freq_pools=[2, 1]
+        )
+        pooled_split_calls = _install_split_spy(monkeypatch, pooled)
+        with torch.no_grad():
+            pooled(x=features, lengths=lengths)
+        assert not pooled_split_calls
 
     @pytest.mark.unit
     def test_defaults_unchanged(self):
