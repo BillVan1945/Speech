@@ -294,40 +294,6 @@ For distributed inference, launch with ``torchrun``:
       inputs=path/to/manifest \
       ep_size=2
 
-Native NeMo-RL checkpoints
-""""""""""""""""""""""""""
-
-NeMo-RL saves distributed checkpoints (DCP) for resuming training. To turn their
-model weights into a Hugging Face checkpoint, use Speech's ``to_hf.py`` with
-``checkpoint_format=nemo_rl``. See :ref:`speechlm-gspo-export` for commands.
-Loading requires every parameter and persistent buffer, including frozen weights
-and any multi-token prediction (MTP) head. Checkpoint-wrapper names are mapped
-back to model names; empty Transformer Engine bookkeeping entries are omitted.
-
-Training integrations can choose which parameters to update through
-``SALMAutomodel``'s ``automodel_freeze_config`` (language model) and
-``perception_freeze_config`` (audio encoder and projection). Both use Automodel's
-``FreezeConfig`` with names relative to that component. For example, this updates
-only the perception projection weight, leaving its bias and encoder frozen:
-
-.. code-block:: yaml
-
-    model:
-      perception_freeze_config:
-        freeze_modules: [{glob: '*'}]
-        unfreeze_parameters: [proj.weight]
-
-Set ``model.torch_dtype: float32`` for FP32 trainable storage. FSDP2 controls
-compute and reduction precision separately and casts ordinary frozen weights
-before sharding; ``perception_mixed_precision`` supplies the audio-side policy.
-``retain_native_mtp: true`` keeps the checkpoint's existing MTP topology while
-``mtp.enabled: false`` disables its auxiliary training. A seed without an MTP
-head stays without one. These settings are opt-in.
-
-For rollout generation, vLLM first loads the complete perception state. Later
-weight updates may contain only the trained tensors: names and shapes are
-validated before loading, and omitted frozen tensors keep their seed values.
-
 Packed Sequences (THD)
 """"""""""""""""""""""
 
@@ -481,90 +447,7 @@ When customizing the training scripts, keep these points in mind:
 GSPO post-training
 ------------------
 
-Fine-tune a SpeechLM to favor more accurate transcriptions with **Group Sequence
-Policy Optimization (GSPO)**. For each recording, the recipe samples several
-transcripts and scores them against a reference using word or character error
-rate. The model learns from the differences. You provide transcribed audio;
-the recipe computes rewards without a judging model or human-ranked responses.
-
-The workflow starts with a Hugging Face model, trains in NeMo-RL, and exports
-back to Hugging Face for serving. It supports
-`Nemotron-3.5-Transcribe-30B-A4B <https://huggingface.co/nvidia/Nemotron-3.5-Transcribe-30B-A4B>`_
-and compatible SpeechLM seeds with or without a CTC timestamp head.
-
-Prepare the model and data
-^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Keep a full local copy of the starting model: weights, ``config.json``,
-``llm_backbone/`` and tokenizer. Training and export both need this seed.
-
-Prepare a Parquet file with one recording per row: an audio path, reference
-transcript, user instruction, language, task and reward metric. Use 16 kHz audio.
-Each row keeps its own instruction, so ordinary transcription
-and speaker-attributed transcription can use different prompts. The reference
-is used for scoring, never included in the model's prompt.
-
-Use ``wer`` for word-error rewards, or the recipe's ``cer`` route for Mandarin
-ASR. The reward is ``1 - error_rate``; lower transcription error earns a higher
-reward. Groups whose responses all receive the same reward are skipped because
-they provide no within-group learning signal.
-
-Train with NeMo-RL
-^^^^^^^^^^^^^^^^^^
-
-Follow the `SpeechLM GSPO guide <https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/gspo-speechlm.md>`_
-for compatible package versions, the exact Parquet schema, launch commands and
-resume instructions. The example runs on four nodes with eight GPUs each for
-up to 400 updates.
-
-The recipe explicitly selects which weights to train; the remaining weights,
-including the MTP and optional CTC heads, stay frozen. Change that selection in
-``policy.native_model.trainable_names`` in the NeMo-RL configuration, keeping
-``expected_trainable_tensors`` and ``expected_trainable_scalars`` consistent with it.
-For a new dataset on the same architecture, keep the tested selection.
-
-Training saves resumable DCP checkpoints. Export a saved step to evaluate or
-serve it; retain the DCP checkpoint to continue training.
-
-.. _speechlm-gspo-export:
-
-Export a trained checkpoint
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-From the Speech checkout, use the policy environment prepared in the GSPO guide.
-First build an export configuration from the **same HF seed used for training**:
-
-.. code-block:: bash
-
-    SEED=/shared/models/Nemotron-3.5-Transcribe-30B-A4B
-    RUN=/shared/results/gspo
-    EXPORT_CONFIG=/shared/results/gspo-export-config.json
-    HF_OUTPUT=/shared/results/gspo-step400-hf
-
-    python examples/speechlm2/prepare_rl_export_config.py \
-      --seed "$SEED" --output "$EXPORT_CONFIG"
-
-Choose an unused ``EXPORT_CONFIG`` path; the helper refuses to overwrite an
-existing file. It reconstructs the Speech model and strategy configuration,
-including CTC metadata when present. This file is the converter's
-``ckpt_config``, separate from the seed's HF ``config.json``.
-
-Then convert the selected step in an eight-GPU allocation:
-
-.. code-block:: bash
-
-    torchrun --standalone --nproc-per-node=8 examples/speechlm2/to_hf.py \
-      class_path=nemo.collections.speechlm2.models.SALMAutomodel \
-      checkpoint_format=nemo_rl \
-      ckpt_path="$RUN/checkpoints/step_400/policy/weights/model" \
-      ckpt_config="$EXPORT_CONFIG" output_dir="$HF_OUTPUT"
-
-``HF_OUTPUT`` contains the trained weights, model and backbone configurations,
-and tokenizer files. Load it with :doc:`vllm_serving`. The exporter retains the
-seed's MTP topology and preserves the CTC artifact's storage and metadata. Other
-weights follow the model's serving dtype rules: FP32 training storage does not
-mean every weight is exported in FP32.
-
-Compare the exported model with the seed using the same evaluation data, prompts
-and decoding settings. If you use CTC timestamps, evaluate them too: a frozen
-CTC head still receives features from an audio encoder that training can change.
+Use Group Sequence Policy Optimization (GSPO) in NeMo-RL to fine-tune SpeechLMs
+with transcription-error rewards. See the
+`SpeechLM GSPO guide <https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/gspo-speechlm.md>`_
+for the recipe.
