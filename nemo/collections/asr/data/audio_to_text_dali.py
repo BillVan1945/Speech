@@ -462,20 +462,24 @@ class _AudioTextDALIDataset(Iterator):
                     if feature_type == 'mfcc':
                         spec = dali.fn.mfcc(spec, n_mfcc=self.n_mfcc)
 
-                # Logarithm
-                if self.log_zero_guard_type == 'add':
-                    spec = spec + self.log_zero_guard_value
+                # Logarithm; with log=False the features stay linear, as in FilterbankFeatures,
+                # and the zero guard is not applied either.
+                if self.log_features:
+                    if self.log_zero_guard_type == 'add':
+                        spec = spec + self.log_zero_guard_value
 
-                # to_decibels computes multiplier * log10(x),
-                # so this multiplier gives the logarithm to log_base, or the natural logarithm when log_base is None;
-                # the cutoff is the guard value in those units.
-                log_multiplier = math.log(10) / math.log(self.log_base) if self.log_base is not None else math.log(10)
-                spec = dali.fn.to_decibels(
-                    spec,
-                    multiplier=log_multiplier,
-                    reference=1.0,
-                    cutoff_db=log_multiplier * math.log10(self.log_zero_guard_value),
-                )
+                    # to_decibels computes multiplier * log10(x),
+                    # so this multiplier gives the logarithm to log_base, or the natural logarithm when log_base is None;
+                    # the cutoff is the guard value in those units.
+                    log_multiplier = (
+                        math.log(10) / math.log(self.log_base) if self.log_base is not None else math.log(10)
+                    )
+                    spec = dali.fn.to_decibels(
+                        spec,
+                        multiplier=log_multiplier,
+                        reference=1.0,
+                        cutoff_db=log_multiplier * math.log10(self.log_zero_guard_value),
+                    )
 
                 # Normalization
                 spec = dali.fn.normalize(spec, axes=self.normalization_axes, epsilon=1e-5**2, ddof=1)
