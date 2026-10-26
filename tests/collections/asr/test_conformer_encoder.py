@@ -18,7 +18,7 @@ import functools
 import numpy as np
 import pytest
 import torch
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from nemo.collections.asr.modules.conformer_encoder import ConformerEncoder
 from nemo.collections.asr.parts.packed_sequence import (
@@ -27,8 +27,15 @@ from nemo.collections.asr.parts.packed_sequence import (
     packed_slot_layout,
     unpack_encoder_output,
 )
-from nemo.collections.asr.parts.submodules.conformer_modules import ConformerConvolution, ConformerFeedForward
-from nemo.collections.asr.parts.submodules.multi_head_attention import RelPositionMultiHeadAttention
+from nemo.collections.asr.parts.submodules.conformer_modules import (
+    ConformerConvolution,
+    ConformerFeedForward,
+    ConformerLayer,
+)
+from nemo.collections.asr.parts.submodules.multi_head_attention import (
+    MultiHeadAttention,
+    RelPositionMultiHeadAttention,
+)
 from nemo.collections.asr.parts.submodules.subsampling import ConvSubsampling
 
 
@@ -333,11 +340,142 @@ class TestConformerBlockComposition:
         assert encoder.layers[0].self_attn.h == 2
 
     @pytest.mark.unit
+    def test_conv_block_context_reaches_the_encoder(self):
+        # a block that sets its own context: the encoder's streaming caches follow it, not the kernel option
+        encoder = _composed_encoder(
+            conv=functools.partial(ConformerConvolution, kernel_size=4, conv_context_size=[3, 0])
+        )
+        assert encoder.conv_kernel_size == 4 and list(encoder.conv_context_size) == [3, 0]
+        assert list(encoder.layers[0].conv.conv_context_size) == [3, 0]
+        _, cache_last_time, _ = encoder.get_initial_cache_state(batch_size=1)
+        assert cache_last_time.shape == (2, 1, 16, 3)
+        causal = _composed_encoder(
+            conv=functools.partial(ConformerConvolution, kernel_size=4, conv_context_size="causal")
+        )
+        assert list(causal.conv_context_size) == [3, 0]
+        with pytest.raises(ValueError, match="conv_context_size"):
+            ConformerConvolution(d_model=16, kernel_size=4, conv_context_size=[1, 1])
+
+    @pytest.mark.unit
+    def test_callable_conv_block_context_reaches_the_encoder(self):
+        # a plain callable binds nothing visibly, so the encoder reads the context from the module it built
+        def causal4(**kwargs):
+            kwargs.update(kernel_size=4, conv_context_size=[3, 0])
+            return ConformerConvolution(**kwargs)
+
+        encoder = _composed_encoder(conv=causal4, att_context_size=[2, 0])
+        assert encoder.conv_kernel_size == 4 and list(encoder.conv_context_size) == [3, 0]
+        cache_last_channel, cache_last_time, cache_len = encoder.get_initial_cache_state(batch_size=1)
+        assert cache_last_time.shape == (2, 1, 16, 3)
+        out, out_len, _, cache_last_time, _ = encoder(
+            audio_signal=torch.randn(1, 20, 16),
+            length=torch.tensor([20]),
+            cache_last_channel=cache_last_channel,
+            cache_last_time=cache_last_time,
+            cache_last_channel_len=cache_len,
+            bypass_pre_encode=True,
+        )
+        assert out.shape == (1, 16, 20) and out_len.tolist() == [20] and cache_last_time.shape == (2, 1, 16, 3)
+
+    @pytest.mark.unit
+    def test_integer_conv_context_size_is_symmetric_padding(self):
+        # the form the module accepted before the kernel check: one integer for both sides
+        conv = ConformerConvolution(d_model=16, kernel_size=5, conv_context_size=2)
+        assert conv.conv_context_size == [2, 2]
+        assert (conv.depthwise_conv._left_padding, conv.depthwise_conv._right_padding) == (2, 2)
+        assert conv(torch.randn(2, 10, 16)).shape == (2, 10, 16)
+        layer = ConformerLayer(d_model=16, d_ff=32, conv_kernel_size=5, conv_context_size=2)
+        assert layer.conv.conv_context_size == [2, 2]
+        with pytest.raises(ValueError, match="conv_context_size"):
+            ConformerConvolution(d_model=16, kernel_size=4, conv_context_size=2)
+
+    @pytest.mark.unit
+    def test_change_attention_model_keeps_the_attention_block(self):
+        encoder = _composed_encoder(self_attn=functools.partial(RelPositionMultiHeadAttention, use_bias=False))
+        encoder._cfg = OmegaConf.create(
+            {
+                "d_model": 16,
+                "n_heads": 2,
+                "dropout": 0.0,
+                "dropout_att": 0.0,
+                "dropout_emb": 0.0,
+                "pos_emb_max_len": 5000,
+            }
+        )
+        encoder.change_attention_model(att_context_size=[2, 2])
+        attention = encoder.layers[0].self_attn
+        assert type(attention) is RelPositionMultiHeadAttention and attention.linear_q.bias is None
+        assert attention._max_cache_len == 2
+        # the stored block fixes the class, so a new attention model needs a block of its own
+        with pytest.raises(ValueError, match="self_attn block"):
+            encoder.change_attention_model(self_attention_model="abs_pos")
+        # a partial has no config form, so it replaces the block only without a config update
+        replacement = functools.partial(MultiHeadAttention, use_bias=False)
+        with pytest.raises(ValueError, match="config form"):
+            encoder.change_attention_model(self_attention_model="abs_pos", self_attn=replacement)
+        encoder.change_attention_model(self_attention_model="abs_pos", self_attn=replacement, update_config=False)
+        assert type(encoder.layers[0].self_attn) is MultiHeadAttention
+        assert encoder.layers[0].self_attn.linear_q.bias is None
+        # the replacement is the active block now: a context-only change rebuilds from it
+        encoder.change_attention_model(att_context_size=[2, 2])
+        for layer in encoder.layers:
+            assert type(layer.self_attn) is MultiHeadAttention and layer.self_attn.linear_q.bias is None
+            assert layer.self_attn._max_cache_len == 2
+
+    @pytest.mark.unit
+    def test_change_attention_model_persists_a_section_replacement(self):
+        attention = "nemo.collections.asr.parts.submodules.multi_head_attention."
+        config = DictConfig(
+            {
+                "_target_": "nemo.collections.asr.modules.ConformerEncoder",
+                "feat_in": 8,
+                "n_layers": 2,
+                "d_model": 16,
+                "n_heads": 2,
+                "subsampling_conv_channels": 4,
+                "dropout": 0.0,
+                "dropout_att": 0.0,
+                "dropout_emb": 0.0,
+                "pos_emb_max_len": 64,
+                "self_attn": {
+                    "_target_": attention + "RelPositionMultiHeadAttention",
+                    "_partial_": True,
+                    "use_bias": False,
+                },
+            }
+        )
+        encoder = ConformerEncoder.from_config_dict(config).eval()
+        encoder.change_attention_model(
+            self_attention_model="abs_pos",
+            self_attn={"_target_": attention + "MultiHeadAttention", "_partial_": True, "use_bias": False},
+        )
+        encoder.change_attention_model(att_context_size=[2, 2])
+        for layer in encoder.layers:
+            assert type(layer.self_attn) is MultiHeadAttention and layer.self_attn.linear_q.bias is None
+        saved = encoder.to_config_dict()
+        assert saved["self_attention_model"] == "abs_pos" and saved["self_attn"]["_target_"].endswith(
+            ".MultiHeadAttention"
+        )
+        # the saved config rebuilds the replaced attention, and the weights fit it
+        rebuilt = ConformerEncoder.from_config_dict(saved).eval()
+        assert (
+            type(rebuilt.layers[0].self_attn) is MultiHeadAttention
+            and rebuilt.layers[0].self_attn.linear_q.bias is None
+        )
+        rebuilt.load_state_dict(encoder.state_dict(), strict=True)
+        signal, length = torch.randn(1, 8, 40), torch.tensor([40])
+        torch.testing.assert_close(
+            rebuilt(audio_signal=signal, length=length)[0], encoder(audio_signal=signal, length=length)[0]
+        )
+
+    @pytest.mark.unit
     def test_defaults_unchanged(self):
         encoder = ConformerEncoder(feat_in=8, n_layers=1, d_model=16, n_heads=2, subsampling_conv_channels=4)
         layer = encoder.layers[0]
         assert type(layer.feed_forward1).__name__ == "ConformerFeedForward"
         assert type(layer.feed_forward1.activation).__name__ == "Swish"
+        # an activation name resolves through the registry, where 'swish' is nn.SiLU like everywhere else in NeMo
+        assert type(ConformerFeedForward(16, 32, 0.0, activation="swish").activation) is torch.nn.SiLU
         assert layer.feed_forward1.linear1.bias is not None
         assert type(layer.norm_out) is torch.nn.LayerNorm and layer.norm_out.eps == 1e-5
         assert layer.conv.batch_norm.eps == 1e-5
