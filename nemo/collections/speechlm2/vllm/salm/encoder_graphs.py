@@ -368,8 +368,8 @@ class EncoderGraphRunner:
     def _call_long(self, processed: torch.Tensor, processed_len: torch.Tensor, return_ctc_timestamp_inputs: bool):
         """Encode audio longer than the whole-forward graphs through the online path and its window graphs.
 
-        The rows run together (at most the largest batch size, as ``_group_by_length`` ensures): the ASR windows of every
-        row are split over the graph batch sizes, and only the diarization steps pad the rows to one. Returns
+        The rows run together (at most the largest batch size, as ``_group_by_length`` ensures): the ASR windows of
+        every row are split over the graph batch sizes, and only the diarization steps pad the rows to one. Returns
         embeddings and CTC inputs.
         """
         frames, padded = processed.shape[2], self._long_frames(processed.shape[2])
