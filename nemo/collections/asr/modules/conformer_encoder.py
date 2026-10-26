@@ -16,6 +16,7 @@
 import math
 import random
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
@@ -42,7 +43,7 @@ from nemo.collections.asr.parts.submodules.subsampling import (
 )
 from nemo.collections.asr.parts.utils import adapter_utils
 from nemo.collections.asr.parts.utils.regularization_utils import compute_stochastic_depth_drop_probs
-from nemo.collections.common.parts.utils import ModuleBlock, block_binds, build_module
+from nemo.collections.common.parts.utils import ModuleBlock, build_module
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.exportable import Exportable
 from nemo.core.classes.mixins import AccessMixin, adapter_mixins
@@ -544,8 +545,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 norm=norm,
             )
             self.layers.append(layer)
-        if self.layers and (block_binds(conv, 'kernel_size') or block_binds(conv, 'conv_context_size')):
-            # the conv block decides the kernel and the context; the streaming caches follow the module it built
+        if self.layers and conv is not None:
+            # the conv block decides the kernel and the context, whatever its form; the streaming caches follow
+            # the module it built
             self.conv_kernel_size = self.layers[0].conv.kernel_size
             self.conv_context_size = list(self.layers[0].conv.conv_context_size)
         self._self_attn_block = self_attn
@@ -1228,7 +1230,9 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 ``self_attention_model='rope'``. If None, the stored config value is kept.
             self_attn: the block the new attention layers are built from, see `ConformerLayer`;
                 default the block the encoder was built with, which keeps its settings when only the context changes.
-                A stored block fixes the attention class, so a change of `self_attention_model` needs a new block here.
+                A stored block fixes the attention class, so a change of `self_attention_model` needs a new block here;
+                the new block replaces the stored one, and with `update_config` it must be a Hydra section,
+                since a class or partial has no config form.
         """
 
         if att_context_size:
@@ -1236,6 +1240,12 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         else:
             att_context_size = self.att_context_size
 
+        replacement_block = self_attn
+        if replacement_block is not None and update_config and not isinstance(replacement_block, Mapping):
+            raise ValueError(
+                "A self_attn block given as a class or partial has no config form; "
+                "pass a Hydra section (a mapping with '_target_') or update_config=False."
+            )
         if self_attn is None:
             self_attn = getattr(self, '_self_attn_block', None)
             if self_attn is not None and self_attention_model not in (None, self.self_attention_model):
@@ -1318,6 +1328,8 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 del m.self_attn
                 m.self_attn = new_attn
                 m.self_attention_model = self_attention_model
+        # later context-only changes rebuild from the block that is active now
+        self._self_attn_block = self_attn
 
         if update_config:
             with open_dict(self._cfg):
@@ -1326,6 +1338,8 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 if self_attention_model == 'rope':
                     self._cfg.rope_base = rope_base
                     self._cfg.rotary_fraction = rotary_fraction
+                if replacement_block is not None:
+                    self._cfg.self_attn = dict(replacement_block)
 
     def change_subsampling_conv_chunking_factor(self, subsampling_conv_chunking_factor: int):
         """

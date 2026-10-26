@@ -354,6 +354,8 @@ class ConformerConvolution(nn.Module):
             conv_context_size = [(kernel_size - 1) // 2, kernel_size // 2]
         elif conv_context_size == 'causal':
             conv_context_size = [kernel_size - 1, 0]
+        elif isinstance(conv_context_size, int):
+            conv_context_size = [conv_context_size, conv_context_size]
         conv_context_size = list(conv_context_size)
         if len(conv_context_size) != 2 or conv_context_size[0] + conv_context_size[1] + 1 != kernel_size:
             raise ValueError(
