@@ -150,7 +150,8 @@ class MaskedBatchNorm1d(nn.Module):
     def _normalize(self, x: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
         reduce_dims = [dim for dim in range(x.dim()) if dim != 1]
         shape = [1, -1] + [1] * (x.dim() - 2)
-        values = x.float()
+        # Half and bfloat16 statistics accumulate in float32; wider inputs keep their precision.
+        values = x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
         if self.training or not self.track_running_stats:
             if mask is None:
                 count = values.new_full((), float(values.numel() // values.shape[1]))

@@ -131,6 +131,40 @@ class TestMaskedBatchNorm1d:
         torch.testing.assert_close(biased.running_mean, unbiased.running_mean)
 
     @pytest.mark.unit
+    def test_input_precision(self):
+        # two float64 values that are equal in float32: the statistics must keep the input's precision
+        rows = torch.tensor([[1e8], [1e8 + 1]], dtype=torch.float64)
+        reference = nn.BatchNorm1d(1).double()
+        masked = MaskedBatchNorm1d(1).double()
+        out = masked(rows)
+        torch.testing.assert_close(out, reference(rows))
+        torch.testing.assert_close(out, torch.tensor([[-1.0], [1.0]], dtype=torch.float64), atol=1e-4, rtol=0)
+        torch.testing.assert_close(masked.running_mean, reference.running_mean)
+        torch.testing.assert_close(masked.running_var, reference.running_var)
+        assert masked.running_var.item() == pytest.approx(0.95)
+        # the same two values selected by lengths from (B, D, T) input, and as packed rows
+        padded = torch.tensor([[[1e8, 7e8]], [[1e8 + 1, 9e8]]], dtype=torch.float64)
+        from_padded = MaskedBatchNorm1d(1).double()
+        torch.testing.assert_close(from_padded(padded, torch.tensor([1, 1]))[:, :, 0], out)
+        torch.testing.assert_close(from_padded.running_var, reference.running_var)
+        from_packed = MaskedBatchNorm1d(1).double()
+        torch.testing.assert_close(from_packed.forward_packed(rows), out)
+        torch.testing.assert_close(from_packed.running_var, reference.running_var)
+        # half and bfloat16 inputs accumulate in float32 and come back in their dtype
+        torch.manual_seed(4)
+        x = torch.randn(2, 4, 6) * 3 + 1
+        for dtype in (torch.float16, torch.bfloat16):
+            reference = nn.BatchNorm1d(4)
+            masked = MaskedBatchNorm1d(4)
+            out = masked(x.to(dtype))
+            assert out.dtype == dtype
+            torch.testing.assert_close(
+                out.float(), reference(x.to(dtype).float()).to(dtype).float(), atol=1e-2, rtol=1e-2
+            )
+            torch.testing.assert_close(masked.running_mean, reference.running_mean, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(masked.running_var, reference.running_var, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.unit
     def test_momentum_none_and_no_running_stats(self):
         torch.manual_seed(3)
         cumulative = MaskedBatchNorm1d(4, momentum=None).train()
