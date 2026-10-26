@@ -324,8 +324,8 @@ class ConformerConvolution(nn.Module):
     Args:
         d_model (int): hidden dimension
         kernel_size (int): kernel size for depthwise convolution;
-            an even kernel pads (kernel_size - 1) // 2 frames before and kernel_size // 2 frames after each frame,
-            unless conv_context_size says otherwise
+            an even kernel pads the sequence with (kernel_size - 1) // 2 frames on the left
+            and kernel_size // 2 frames on the right, unless conv_context_size says otherwise
         pointwise_activation (str): name of the activation function to be used for the pointwise conv.
             Note that Conformer uses a special key `glu_` which is treated as the original default from
             the paper.
