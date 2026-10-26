@@ -36,6 +36,10 @@ from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 
 from nemo.collections.speechlm2.vllm.salm.audio import _pad_to_vocab_size
 
+# Checkpoint tensors the draft head loads (see _remap_nemo_mtp_weights): the MTP layers, the LM head, and the
+# token embeddings under either export name.
+_DRAFT_CHECKPOINT_PREFIXES = ("llm.mtp.", "llm.lm_head.", "llm.model.embed_tokens.", "llm.backbone.embeddings.")
+
 
 def _remap_nemo_mtp_weights(
     items: Iterable[tuple[str, torch.Tensor]],
@@ -118,6 +122,19 @@ class NeMoSpeechLMMTP(NemotronHMTP):
     # capability flag; implementing ``embed_input_ids`` alone is not enough.
     supports_multimodal_embeddings = True
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        """Whether vLLM can skip a checkpoint tensor without reading it.
+
+        vLLM 0.32 calls this on the raw checkpoint names before reading them, and NemotronHMTP.load_weights
+        calls it again on the names ``load_weights`` below has already remapped (``mtp.*``, ``lm_head.*``,
+        ``backbone.embeddings.*``). NemotronHMTP's own rule expects unprefixed names, so it would skip every
+        ``llm.``-prefixed draft tensor and leave the draft head uninitialized.
+        """
+        if name.startswith("llm."):
+            return not name.startswith(_DRAFT_CHECKPOINT_PREFIXES)
+        parent = getattr(super(), "is_unused_checkpoint_weight", None)
+        return parent(name) if parent is not None else False
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -146,11 +163,23 @@ class NeMoSpeechLMMTP(NemotronHMTP):
             is_multimodal=is_multimodal,
         )
 
+    def compute_logits(self, hidden_states: torch.Tensor, *args, **kwargs) -> torch.Tensor | None:
+        logits = super().compute_logits(hidden_states, *args, **kwargs)
+        if logits is not None:
+            logits[..., self.config.speechlm_output_vocab_size :] = -torch.inf
+            for token_id in getattr(self.config, "speechlm_runtime_added_token_ids", []):
+                if token_id < logits.shape[-1]:
+                    logits[..., token_id] = -torch.inf
+        return logits
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load only the SALM-prefixed weights required by the reusable draft head."""
         # NeMoSpeechLMConfig delegates this to the already padded text-config
         # vocabulary used to construct NemotronHMTP. Reading config directly
         # avoids coupling padding to vLLM's internal module names.
+        from nemo.collections.speechlm2.vllm.salm.precision import preserve_hybrid_precision
+
+        preserve_hybrid_precision(self)
         target_vocab = int(self.config.vocab_size)
         if target_vocab <= 0:
             raise ValueError(f"Draft model vocabulary size must be positive, got {target_vocab}.")
@@ -161,10 +190,28 @@ class NeMoSpeechLMMTP(NemotronHMTP):
         pattern = self.config.mtp_hybrid_override_pattern
         if not isinstance(pattern, str) or not pattern:
             raise ValueError(f"mtp_hybrid_override_pattern must be a non-empty string, got {pattern!r}.")
-        return super().load_weights(
-            _remap_nemo_mtp_weights(
-                weights,
-                target_vocab,
-                expected_layer_modules=len(pattern),
+        head_tensors = 0
+
+        def _count_head_tensors(items: Iterable[tuple[str, torch.Tensor]]) -> Iterable[tuple[str, torch.Tensor]]:
+            nonlocal head_tensors
+            for name, tensor in items:
+                if name.startswith("mtp."):
+                    head_tensors += 1
+                yield name, tensor
+
+        loaded = super().load_weights(
+            _count_head_tensors(
+                _remap_nemo_mtp_weights(
+                    weights,
+                    target_vocab,
+                    expected_layer_modules=len(pattern),
+                )
             )
         )
+        if head_tensors == 0:
+            raise ValueError(
+                "Speculative MTP is enabled, but the checkpoint has no 'llm.mtp.*' draft-head tensors, so the "
+                "draft head would run on uninitialized weights (vLLM skips its missing-weight check for quantized "
+                "checkpoints). Export the MTP head with the checkpoint or disable speculative decoding."
+            )
+        return loaded
