@@ -16,6 +16,7 @@
 import math
 import random
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
@@ -32,15 +33,12 @@ from nemo.collections.asr.parts.packed_sequence import (
     packed_slot_layout,
 )
 from nemo.collections.asr.parts.submodules.causal_convs import CausalConv1D
-from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLayer
+from nemo.collections.asr.parts.submodules.conformer_modules import ConformerLayer, build_self_attention
 from nemo.collections.asr.parts.submodules.multi_head_attention import (
     LocalAttRelPositionalEncoding,
     MultiHeadAttention,
     PositionalEncoding,
     RelPositionalEncoding,
-    RelPositionMultiHeadAttention,
-    RelPositionMultiHeadAttentionLongformer,
-    RoPEMultiHeadAttention,
     RotaryPositionalEncoding,
 )
 from nemo.collections.asr.parts.submodules.packed_attention import PackedAttentionContext
@@ -51,7 +49,7 @@ from nemo.collections.asr.parts.submodules.subsampling import (
 )
 from nemo.collections.asr.parts.utils import adapter_utils
 from nemo.collections.asr.parts.utils.regularization_utils import compute_stochastic_depth_drop_probs
-from nemo.collections.common.parts.utils import ModuleBlock, block_binds, build_module
+from nemo.collections.common.parts.utils import ModuleBlock, build_module
 from nemo.core.classes.common import typecheck
 from nemo.core.classes.exportable import Exportable
 from nemo.core.classes.mixins import AccessMixin, adapter_mixins
@@ -206,8 +204,11 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
             its `subsampling_factor`, if it has one, becomes the encoder's
         feed_forward: block of the feed-forward modules of every layer, see `ConformerLayer`;
             the layer supplies sizes, dropouts and the options above, the block names what deviates
-        conv: block of the convolution module of every layer, see `ConformerLayer`
-        self_attn: block of the self-attention of every layer, see `ConformerLayer`
+        conv: block of the convolution module of every layer, see `ConformerLayer`;
+            the encoder takes `conv_kernel_size` and `conv_context_size` for its streaming caches from the module
+            the block builds, which exposes them as `kernel_size` and `conv_context_size`
+        self_attn: block of the self-attention of every layer, see `ConformerLayer`;
+            `change_attention_model` rebuilds the attention from the same block
         norm: block of every layer norm, see `ConformerLayer`
 
     Besides the padded ``forward``, the encoder runs sequence-packed through ``forward_sequence_packed``,
@@ -556,11 +557,12 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 norm=norm,
             )
             self.layers.append(layer)
-        if block_binds(conv, 'kernel_size') and self.layers:
-            # the conv block decides the kernel; keep the streaming context consistent with it
+        if self.layers and conv is not None:
+            # the conv block decides the kernel and the context, whatever its form; the streaming caches follow
+            # the module it built
             self.conv_kernel_size = self.layers[0].conv.kernel_size
-            if not block_binds(conv, 'conv_context_size'):
-                self.conv_context_size = [(self.conv_kernel_size - 1) // 2, self.conv_kernel_size // 2]
+            self.conv_context_size = list(self.layers[0].conv.conv_context_size)
+        self._self_attn_block = self_attn
 
         if feat_out > 0 and feat_out != self._feat_out:
             self.out_proj = nn.Linear(self._feat_out, feat_out)
@@ -1332,6 +1334,7 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
         device: torch.device = None,
         rope_base: float = None,
         rotary_fraction: float = None,
+        self_attn: ModuleBlock | None = None,
     ):
         """
         Update the self_attention_model which changes the positional encoding and attention layers.
@@ -1363,12 +1366,31 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 ``self_attention_model='rope'``. If None, the stored config value is kept.
             rotary_fraction (float): Fraction of the per-head dim to rotate. Only used when
                 ``self_attention_model='rope'``. If None, the stored config value is kept.
+            self_attn: the block the new attention layers are built from, see `ConformerLayer`;
+                default the block the encoder was built with, which keeps its settings when only the context changes.
+                A stored block fixes the attention class, so a change of `self_attention_model` needs a new block here;
+                the new block replaces the stored one, and with `update_config` it must be a Hydra section,
+                since a class or partial has no config form.
         """
 
         if att_context_size:
             att_context_size = list(att_context_size)
         else:
             att_context_size = self.att_context_size
+
+        replacement_block = self_attn
+        if replacement_block is not None and update_config and not isinstance(replacement_block, Mapping):
+            raise ValueError(
+                "A self_attn block given as a class or partial has no config form; "
+                "pass a Hydra section (a mapping with '_target_') or update_config=False."
+            )
+        if self_attn is None:
+            self_attn = getattr(self, '_self_attn_block', None)
+            if self_attn is not None and self_attention_model not in (None, self.self_attention_model):
+                raise ValueError(
+                    f"The encoder's self_attn block fixes the attention class of '{self.self_attention_model}'; "
+                    f"pass a self_attn block for '{self_attention_model}' to change the attention model."
+                )
 
         if self_attention_model is None:
             self_attention_model = self.self_attention_model
@@ -1426,63 +1448,26 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
 
         for _, m in self.named_modules():
             if type(m) == ConformerLayer:
-                if self_attention_model == 'rel_pos':
-                    new_attn = RelPositionMultiHeadAttention(
-                        n_head=self._cfg.n_heads,
-                        n_feat=self._cfg.d_model,
-                        dropout_rate=self._cfg.dropout_att,
-                        max_cache_len=att_context_size[0],
-                        pos_bias_u=None,
-                        pos_bias_v=None,
-                        use_bias=getattr(self._cfg, 'use_bias', True),
-                        use_pytorch_sdpa=self.use_pytorch_sdpa,
-                        use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-                    )
-                elif self_attention_model == 'rel_pos_local_attn':
-                    new_attn = RelPositionMultiHeadAttentionLongformer(
-                        n_head=self._cfg.n_heads,
-                        n_feat=self._cfg.d_model,
-                        dropout_rate=self._cfg.dropout_att,
-                        max_cache_len=att_context_size[0],
-                        att_context_size=att_context_size,
-                        pos_bias_u=None,
-                        pos_bias_v=None,
-                        use_bias=getattr(self._cfg, 'use_bias', True),
-                        use_pytorch_sdpa=self.use_pytorch_sdpa,
-                        use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-                    )
-                elif self_attention_model == 'abs_pos':
-                    new_attn = MultiHeadAttention(
-                        n_head=self._cfg.n_heads,
-                        n_feat=self._cfg.d_model,
-                        dropout_rate=self._cfg.dropout_att,
-                        max_cache_len=att_context_size[0],
-                        use_bias=getattr(self._cfg, 'use_bias', True),
-                        use_pytorch_sdpa=self.use_pytorch_sdpa,
-                        use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-                    )
-                elif self_attention_model == 'rope':
-                    new_attn = RoPEMultiHeadAttention(
-                        n_head=self._cfg.n_heads,
-                        n_feat=self._cfg.d_model,
-                        dropout_rate=self._cfg.dropout_att,
-                        pos_enc=new_pos_enc,
-                        max_cache_len=att_context_size[0],
-                        use_bias=getattr(self._cfg, 'use_bias', True),
-                        use_pytorch_sdpa=self.use_pytorch_sdpa,
-                        use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
-                    )
-                else:
-                    raise ValueError(
-                        f"'{self_attention_model}' is not not a valid value for 'self_attention_model', "
-                        f"valid values can be from ['rel_pos', 'rel_pos_local_attn', 'abs_pos', 'rope']"
-                    )
+                new_attn = build_self_attention(
+                    self_attn,
+                    self_attention_model,
+                    n_heads=self._cfg.n_heads,
+                    d_model=self._cfg.d_model,
+                    dropout_att=self._cfg.dropout_att,
+                    att_context_size=att_context_size,
+                    use_bias=getattr(self._cfg, 'use_bias', True),
+                    use_pytorch_sdpa=self.use_pytorch_sdpa,
+                    use_pytorch_sdpa_backends=self.use_pytorch_sdpa_backends,
+                    pos_enc=new_pos_enc,
+                )
                 if device is not None:
                     new_attn = new_attn.to(device=device)
                 new_attn.load_state_dict(m.self_attn.state_dict(), strict=False)
                 del m.self_attn
                 m.self_attn = new_attn
                 m.self_attention_model = self_attention_model
+        # later context-only changes rebuild from the block that is active now
+        self._self_attn_block = self_attn
 
         if update_config:
             with open_dict(self._cfg):
@@ -1491,6 +1476,8 @@ class ConformerEncoder(NeuralModule, StreamingEncoder, Exportable, AccessMixin):
                 if self_attention_model == 'rope':
                     self._cfg.rope_base = rope_base
                     self._cfg.rotary_fraction = rotary_fraction
+                if replacement_block is not None:
+                    self._cfg.self_attn = dict(replacement_block)
 
     def change_subsampling_conv_chunking_factor(self, subsampling_conv_chunking_factor: int):
         """
