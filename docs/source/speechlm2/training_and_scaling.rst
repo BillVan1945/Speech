@@ -444,10 +444,8 @@ When customizing the training scripts, keep these points in mind:
 
 .. _speechlm-gspo:
 
-GSPO post-training
+Post-training
 ------------------
 
-Use Group Sequence Policy Optimization (GSPO) in NeMo-RL to fine-tune SpeechLMs
-with transcription-error rewards. See the
+See
 `SpeechLM GSPO guide <https://github.com/NVIDIA-NeMo/RL/blob/main/docs/guides/gspo-speechlm.md>`_
-for the recipe.
