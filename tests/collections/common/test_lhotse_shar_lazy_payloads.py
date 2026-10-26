@@ -146,10 +146,13 @@ def production_shar(tmp_path) -> tuple[Path, dict[str, dict[str, np.ndarray]]]:
 @pytest.fixture
 def resampled_tar_shar(tmp_path) -> Path:
     """
-    The cuts carry the ORIGINAL recording, a 32 kHz source with two resample transforms down to 16 kHz, as the
-    release cuts do; the audio tar holds the 24 kHz bytes and a tar manifest that describes exactly those
-    bytes (no transforms), as ``AudioTarWriter`` writes it. The eager and streaming readers take the tar
-    manifest, so loading works; lazy mode must take it too, or it applies the stale transforms to the bytes.
+    The cuts carry the ORIGINAL recording as the release cuts do: a ``file`` source at 32 kHz with one
+    ``Resample(32000 -> 24000)`` transform, declared as 24 kHz. The audio tar holds the already resampled 24 kHz
+    bytes and a tar manifest that describes exactly those bytes (no transforms), as ``AudioTarWriter`` writes it.
+    The eager and streaming readers take the tar manifest, so loading works; lazy mode must take it too, or the
+    stale transform is applied to bytes that are already 24 kHz. The TTS dataset then resamples to 16 kHz at
+    runtime, which is legitimate in both modes. Four-second cuts: the shrunken result then exceeds Lhotse's
+    duration-mismatch tolerance and fails loudly instead of being padded quietly.
     """
     root = tmp_path / "resampled-tar-shar"
     root.mkdir()
@@ -159,33 +162,33 @@ def resampled_tar_shar(tmp_path) -> Path:
         AudioTarWriter(f"{root}/recording.%06d.tar", shard_size=SHARD_SIZE, format="wav") as tar_writer,
     ):
         for idx in range(NUM_CUTS):
-            audio_24k = rng.uniform(-0.3, 0.3, (1, 24000)).astype(np.float32)  # one second at 24 kHz
+            audio_24k = rng.uniform(-0.3, 0.3, (1, 96000)).astype(np.float32)  # four seconds at 24 kHz
             tar_manifest = Recording(
                 id=f"rec-{idx:04d}",
                 sources=[AudioSource(type="memory", channels=[0], source=b"")],
                 sampling_rate=24000,
-                num_samples=24000,
-                duration=1.0,
+                num_samples=96000,
+                duration=4.0,
             )
             tar_writer.write(f"cut-{idx:04d}", audio_24k, 24000, manifest=tar_manifest)
             original = Recording(
                 id=f"rec-{idx:04d}",
                 sources=[AudioSource(type="file", channels=[0], source=f"/original/rec-{idx:04d}.wav")],
                 sampling_rate=32000,
-                num_samples=32000,
-                duration=1.0,
+                num_samples=128000,
+                duration=4.0,
             )
-            recording = original.resample(24000).resample(16000)
+            recording = original.resample(24000)
             cuts_writer.write(
                 MonoCut(
                     id=f"cut-{idx:04d}",
                     start=0.0,
-                    duration=1.0,
+                    duration=4.0,
                     channel=0,
                     recording=recording,
                     supervisions=[
                         SupervisionSegment(
-                            id=f"sup-{idx:04d}", recording_id=recording.id, start=0.0, duration=1.0, text="x"
+                            id=f"sup-{idx:04d}", recording_id=recording.id, start=0.0, duration=4.0, text="x"
                         )
                     ],
                 )
@@ -470,10 +473,12 @@ def test_lazy_payloads_take_field_manifest_from_tar(resampled_tar_shar):
         assert not cut.recording.transforms
         assert cut.recording.sources[0].type == "shar_ptr"
         np.testing.assert_array_equal(cut.load_audio(), reference.load_audio())
-        np.testing.assert_array_equal(
-            cut.truncate(duration=0.5).load_audio(), reference.truncate(duration=0.5).load_audio()
-        )
-    assert seen == set(expected)
+        # What the TTS dataset does at runtime: resample to 16 kHz, then load a truncated piece.
+        actual_16k = cut.resample(16000).truncate(duration=1.5).load_audio()
+        expected_16k = reference.resample(16000).truncate(duration=1.5).load_audio()
+        assert actual_16k.shape == expected_16k.shape == (1, 24000)
+        np.testing.assert_array_equal(actual_16k, expected_16k)
+    assert seen == set(expected) and len(seen) == NUM_CUTS
 
 
 def test_lazy_payloads_reject_slice_length(tts_shar):
