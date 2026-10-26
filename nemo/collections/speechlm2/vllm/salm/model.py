@@ -126,6 +126,11 @@ class NeMoSpeechLMForConditionalGeneration(
     # EncoderGraphRunner, set when the config enables encoder_cuda_graphs.
     _encoder_graphs = None
 
+    # vLLM accepts --use-replayssm (ReplaySSM cached Mamba decode; with MTP from vLLM 0.32) only for models that
+    # declare this flag. The Mamba state shapes and dtypes, the ReplaySSM ring included, come from
+    # NemotronHForCausalLM through the IsHybrid classmethods below.
+    supports_replayssm = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
