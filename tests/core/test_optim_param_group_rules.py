@@ -113,6 +113,27 @@ class TestApplyParamGroupRules:
         )
 
     @pytest.mark.unit
+    def test_single_parameter_as_a_group(self):
+        class Scaled(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(2, 2)
+                self.scale = torch.nn.Parameter(torch.ones(()))
+
+        module = Scaled()
+        groups = apply_param_group_rules(
+            module,
+            [{'params': module.linear.weight, 'lr': 0.1}, {'params': module.scale, 'lr': 0.2}],
+            {'rule': {'param_names': ['linear.weight', 'scale'], 'weight_decay': 0.0}},
+        )
+        # a single parameter as a group's `params`, as the optimizer takes it, stays that parameter
+        assert groups == [
+            {'lr': 0.1, 'weight_decay': 0.0, 'params': [module.linear.weight]},
+            {'lr': 0.2, 'weight_decay': 0.0, 'params': [module.scale]},
+        ]
+        torch.optim.SGD(groups, lr=0.1)
+
+    @pytest.mark.unit
     def test_several_base_groups_and_rule_order(self):
         network = Network()
         groups = apply_param_group_rules(

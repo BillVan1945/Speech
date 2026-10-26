@@ -62,7 +62,8 @@ def apply_param_group_rules(
 
     Args:
         module: the module whose parameters the groups hold; it resolves owners and names
-        param_groups: parameter groups as the optimizer takes them, dicts with ``params`` or plain parameters
+        param_groups: parameter groups as the optimizer takes them,
+            dicts with ``params`` (parameters or a single parameter) or plain parameters
         rules: rule name to rule; the name labels the rule in error messages and documentation only
 
     Returns:
@@ -91,8 +92,11 @@ def apply_param_group_rules(
 
     result: List[Dict[str, Any]] = []
     for group in param_groups:
+        group_params = group['params']
+        if isinstance(group_params, torch.Tensor):
+            group_params = [group_params]
         buckets: Dict[Tuple[str, ...], List[torch.Tensor]] = {}
-        for param in group['params']:
+        for param in group_params:
             buckets.setdefault(matching_rules(param), []).append(param)
         for matched, params in buckets.items():
             new_group = {key: value for key, value in group.items() if key != 'params'}
