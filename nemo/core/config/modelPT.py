@@ -158,7 +158,9 @@ class ModelConfigBuilder:
 
         @dataclass
         class WrappedOptimConfig(OptimConfig, cfg.__class__):
-            pass
+            # the scheduler config is the scheduler's parameter config with its name, not a `SchedConfig`,
+            # whose `min_lr` not every scheduler accepts
+            sched: Optional[config.SchedulerParams] = None
 
         # Setup optim
         optim_name = cfg.__class__.__name__.replace("Params", "").lower()
@@ -167,8 +169,8 @@ class ModelConfigBuilder:
         if sched_cfg is not None:
 
             @dataclass
-            class WrappedSchedConfig(SchedConfig, sched_cfg.__class__):
-                pass
+            class WrappedSchedConfig(sched_cfg.__class__):
+                name: str = MISSING
 
             # Setup scheduler
             sched_name = sched_cfg.__class__.__name__.replace("Params", "")
